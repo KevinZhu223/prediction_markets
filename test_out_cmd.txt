@@ -1,0 +1,40 @@
+============================================================
+  Strategies V2 -- Expansion Module Tests
+============================================================
+
+=== Test 1: Weather Arb (NOAA) ===
+  [PASS] NOAA fetch KJFK observation -- temp=51.8F, station=KJFK
+  [PASS] NOAA fetch KORD observation -- temp=51.8F
+  [PASS] NOAA recent observations -- got 3 observations
+  [PASS] Weather signal: temp above strike -> BUY_YES -- conf=0.95
+  [PASS] Weather signal: temp below strike -> BUY_NO -- Signal success
+  [PASS] Weather market parser -- station=KJFK, strike=75.0, type=temperature
+
+=== Test 2: Macro News Sniper ===
+  [FAIL] BLS CPI page reachable -- status=403
+  [PASS] Macro signal: CPI above consensus -> BUY_YES -- actual=3.5 vs consensus=3.0
+  [PASS] Macro signal: CPI below consensus -> BUY_NO -- Signal success
+  [PASS] Macro: no signal on tiny surprise -- correctly suppressed
+
+=== Test 3: Equity Index Arb ===
+  [PASS] Yahoo Finance S&P 500 -- SPX=6582.7, change=0.11%
+  [PASS] Yahoo Finance Nasdaq-100 -- NDX=24045.5
+  [PASS] Index signal: SPX above strike -> BUY_YES -- Signal success
+Traceback (most recent call last):
+  File "C:\Users\kevin\OneDrive\Documents\CS projects\prediction_markets\prediction_markets\test_strategies_v2.py", line 360, in <module>
+    success = asyncio.run(run_all())
+  File "C:\Users\kevin\AppData\Local\Programs\Python\Python313\Lib\asyncio\runners.py", line 194, in run
+    return runner.run(main)
+           ~~~~~~~~~~^^^^^^
+  File "C:\Users\kevin\AppData\Local\Programs\Python\Python313\Lib\asyncio\runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "C:\Users\kevin\AppData\Local\Programs\Python\Python313\Lib\asyncio\base_events.py", line 720, in run_until_complete
+    return future.result()
+           ~~~~~~~~~~~~~^^
+  File "C:\Users\kevin\OneDrive\Documents\CS projects\prediction_markets\prediction_markets\test_strategies_v2.py", line 339, in run_all
+    await test_equity_index()
+  File "C:\Users\kevin\OneDrive\Documents\CS projects\prediction_markets\prediction_markets\test_strategies_v2.py", line 251, in test_equity_index
+    f"distance={signal_below.distance_pct:.2f}%" if signal_below else "No signal",
+                ^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'Signal' object has no attribute 'distance_pct'

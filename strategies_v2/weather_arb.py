@@ -1,0 +1,458 @@
+"""
+Hourly Weather Arbitrage Strategy
+
+Exploits the lag between real-time NOAA weather station observations and
+Kalshi's hourly temperature / precipitation markets.
+
+How it works:
+  1. Kalshi settles "Will the temperature at JFK exceed 75°F at 2 PM?"
+     based on the NOAA METAR observation for station KJFK.
+  2. NOAA publishes observations every ~5-10 minutes.
+  3. If we read the NOAA observation showing 77°F at 1:50 PM, and
+     the Kalshi YES contract is still at 85¢, there's a 15¢ edge
+     because the outcome is essentially decided.
+
+Target Kalshi series:
+  - KXTEMPH   : Hourly temperature (e.g. "Will temp at JFK be above 75°F?")
+  - KXPRECIPH : Hourly precipitation (e.g. "Will it rain at ORD?")
+
+NOAA data source:
+  - api.weather.gov  (free, no API key required, updates every ~5 min)
+"""
+
+import asyncio
+import logging
+import time
+from datetime import datetime, timezone
+from typing import Optional
+from dataclasses import dataclass
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+
+# ── NOAA Station Mappings ───────────────────────────────────────────────────
+
+# Maps Kalshi location codes to NOAA station IDs
+# These are the stations Kalshi uses for settlement
+STATION_MAP = {
+    "nyc":     "KJFK",   # JFK Airport, New York
+    "chicago": "KORD",   # O'Hare Airport, Chicago
+    "la":      "KLAX",   # LAX Airport, Los Angeles
+    "miami":   "KMIA",   # Miami International
+    "dallas":  "KDFW",   # Dallas/Fort Worth
+    "denver":  "KDEN",   # Denver International
+    "seattle": "KSEA",   # Seattle-Tacoma
+    "atlanta": "KATL",   # Hartsfield-Jackson Atlanta
+}
+
+
+@dataclass
+class WeatherObservation:
+    """A single NOAA weather station observation."""
+    station_id: str
+    timestamp: datetime
+    temperature_f: Optional[float]
+    temperature_c: Optional[float]
+    precipitation_last_hour_mm: Optional[float]
+    wind_speed_mph: Optional[float]
+    humidity_pct: Optional[float]
+    raw_text: str = ""
+
+from models import Signal, Side, ContractSide, Platform
+
+
+class NOAAClient:
+    """
+    Fetches real-time weather observations from the National Weather Service API.
+    Documentation: https://www.weather.gov/documentation/services-web-api
+    """
+
+    BASE_URL = "https://api.weather.gov"
+
+    def __init__(self):
+        self._client = httpx.AsyncClient(
+            timeout=10.0,
+            headers={
+                "User-Agent": "(prediction-market-bot, contact@example.com)",
+                "Accept": "application/geo+json",
+            },
+        )
+
+    async def get_latest_observation(self, station_id: str) -> Optional[WeatherObservation]:
+        """
+        Fetch the most recent observation from a NOAA station.
+        
+        Example: get_latest_observation("KJFK") returns the latest
+        temperature, precipitation, etc. from JFK airport.
+        """
+        url = f"{self.BASE_URL}/stations/{station_id}/observations/latest"
+        
+        try:
+            resp = await self._client.get(url)
+            resp.raise_for_status()
+            data = resp.json()
+
+            props = data.get("properties", {})
+
+            # Extract temperature (NOAA returns Celsius)
+            temp_c = self._extract_value(props, "temperature")
+            temp_f = (temp_c * 9 / 5 + 32) if temp_c is not None else None
+
+            # Extract precipitation
+            precip_mm = self._extract_value(props, "precipitationLastHour")
+
+            # Extract wind
+            wind_ms = self._extract_value(props, "windSpeed")
+            wind_mph = (wind_ms * 2.237) if wind_ms is not None else None
+
+            # Extract humidity
+            humidity = self._extract_value(props, "relativeHumidity")
+
+            # Parse timestamp
+            ts_str = props.get("timestamp", "")
+            try:
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            except Exception:
+                ts = datetime.now(timezone.utc)
+
+            return WeatherObservation(
+                station_id=station_id,
+                timestamp=ts,
+                temperature_f=temp_f,
+                temperature_c=temp_c,
+                precipitation_last_hour_mm=precip_mm,
+                wind_speed_mph=wind_mph,
+                humidity_pct=humidity,
+                raw_text=props.get("rawMessage", ""),
+            )
+
+        except httpx.HTTPStatusError as e:
+            logger.error("NOAA API error for %s: %s", station_id, e)
+            return None
+        except Exception as e:
+            logger.error("NOAA fetch failed for %s: %s", station_id, e)
+            return None
+
+    async def get_recent_observations(
+        self, station_id: str, limit: int = 6
+    ) -> list[WeatherObservation]:
+        """
+        Fetch the last N observations to detect trends.
+        Useful for predicting whether temperature will cross a threshold.
+        """
+        url = f"{self.BASE_URL}/stations/{station_id}/observations"
+        params = {"limit": limit}
+
+        try:
+            resp = await self._client.get(url, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+
+            observations = []
+            for feature in data.get("features", []):
+                props = feature.get("properties", {})
+                temp_c = self._extract_value(props, "temperature")
+                temp_f = (temp_c * 9 / 5 + 32) if temp_c is not None else None
+
+                ts_str = props.get("timestamp", "")
+                try:
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                except Exception:
+                    ts = datetime.now(timezone.utc)
+
+                observations.append(WeatherObservation(
+                    station_id=station_id,
+                    timestamp=ts,
+                    temperature_f=temp_f,
+                    temperature_c=temp_c,
+                    precipitation_last_hour_mm=self._extract_value(props, "precipitationLastHour"),
+                    wind_speed_mph=None,
+                    humidity_pct=None,
+                ))
+
+            return observations
+
+        except Exception as e:
+            logger.error("NOAA recent observations failed for %s: %s", station_id, e)
+            return []
+
+    @staticmethod
+    def _extract_value(props: dict, key: str) -> Optional[float]:
+        """Extract a numeric value from NOAA's nested JSON structure."""
+        entry = props.get(key, {})
+        if isinstance(entry, dict):
+            val = entry.get("value")
+            return float(val) if val is not None else None
+        return None
+
+    async def close(self):
+        await self._client.aclose()
+
+
+class WeatherArbStrategy:
+    """
+    Monitors NOAA stations and generates signals for Kalshi weather markets.
+    
+    Strategy logic:
+    - For TEMPERATURE markets ("above X°F"):
+      - If observed temp > strike by 2°F+ → BUY YES (high confidence)
+      - If observed temp < strike by 2°F+ → BUY NO (high confidence)
+      - If within ±2°F → use trend from recent observations
+      
+    - For PRECIPITATION markets ("will it rain?"):
+      - If precip > 0.01mm observed → BUY YES
+      - If precip == 0 and < 15 min to settle → BUY NO (risky but edgy)
+    """
+
+    def __init__(self, kalshi_exchange=None):
+        self.noaa = NOAAClient()
+        self.kalshi = kalshi_exchange
+        self._active = False
+
+        # Configuration
+        self.poll_interval_seconds = 120  # Check every 2 minutes
+        self.temp_confidence_margin = 2.0  # °F margin for high confidence
+        self.min_edge_cents = 5  # Minimum edge to trade (5¢)
+
+        # Track active markets
+        self._active_markets: list[dict] = []
+        self._signals_generated: list[Signal] = []
+
+    async def start(self):
+        self._active = True
+        logger.info("Weather arb: started (poll_interval=%ds)", self.poll_interval_seconds)
+
+    async def stop(self):
+        self._active = False
+        await self.noaa.close()
+
+    async def run_loop(self, signal_callback=None):
+        """Main loop: discover weather markets, poll NOAA, generate signals."""
+        while self._active:
+            try:
+                # Step 1: Discover active weather markets on Kalshi
+                await self._discover_markets()
+
+                # Step 2: For each market, check NOAA and evaluate
+                for market in self._active_markets:
+                    signal = await self._evaluate_market(market)
+                    if signal:
+                        self._signals_generated.append(signal)
+                        logger.info(
+                            "WEATHER SIGNAL: %s %s (reason: %s)",
+                            signal.action, signal.market_id,
+                            signal.reason,
+                        )
+                        if signal_callback:
+                            await signal_callback(signal)
+
+            except Exception as e:
+                logger.error("Weather arb loop error: %s", e)
+
+            await asyncio.sleep(self.poll_interval_seconds)
+
+    async def _discover_markets(self):
+        """Find active hourly weather markets on Kalshi."""
+        if not self.kalshi:
+            return
+
+        try:
+            # Broaden discovery: Fetch all and filter by keywords in title
+            all_markets = await self.kalshi.fetch_markets()
+            
+            self._active_markets = [
+                m for m in all_markets
+                if m.get("status") == "active"
+                and ("temperature" in m.get("title", "").lower() or "precip" in m.get("title", "").lower() or "temp" in m.get("title", "").lower())
+            ]
+            
+            temp_count = sum(1 for m in self._active_markets if "temp" in m.get("title", "").lower())
+            precip_count = len(self._active_markets) - temp_count
+
+            logger.info(
+                "Weather arb: found %d active weather markets (temp=%d, precip=%d)",
+                len(self._active_markets), temp_count, precip_count,
+            )
+
+        except Exception as e:
+            logger.error("Weather market discovery failed: %s", e)
+
+    async def _evaluate_market(self, market: dict) -> Optional[Signal]:
+        """
+        Evaluate a single weather market against real-time NOAA data.
+        """
+        ticker = market.get("ticker", "")
+        title = market.get("title", "")
+        # Elections API uses dollar fields
+        yes_bid_d = market.get("yes_bid_dollars")
+        yes_ask_d = market.get("yes_ask_dollars")
+        yes_bid = float(yes_bid_d) if yes_bid_d and float(yes_bid_d) > 0 else 0.0
+        yes_ask = float(yes_ask_d) if yes_ask_d and float(yes_ask_d) > 0 else 0.0
+
+        if yes_ask <= 0:
+            return None
+
+        # Parse the market to determine the station and strike
+        station_id, strike_value, market_type = self._parse_weather_market(title, ticker)
+        if not station_id:
+            return None
+
+        # Fetch the latest observation from NOAA
+        obs = await self.noaa.get_latest_observation(station_id)
+        if not obs:
+            return None
+
+        # Determine observed value
+        if market_type == "temperature":
+            observed = obs.temperature_f
+        elif market_type == "precipitation":
+            observed = obs.precipitation_last_hour_mm
+        else:
+            return None
+
+        if observed is None:
+            return None
+
+        # Calculate edge
+        return self._calculate_signal(
+            ticker=ticker,
+            market_type=market_type,
+            observed=observed,
+            strike=strike_value,
+            yes_bid=yes_bid,
+            yes_ask=yes_ask,
+            station_id=station_id,
+        )
+
+    def _calculate_signal(
+        self,
+        ticker: str,
+        market_type: str,
+        observed: float,
+        strike: float,
+        yes_bid: float,
+        yes_ask: float,
+        station_id: str,
+    ) -> Optional[Signal]:
+        """
+        Core signal generation logic.
+        """
+        if market_type == "temperature":
+            # "Above X°F" market
+            diff = observed - strike
+
+            if diff > self.temp_confidence_margin:
+                # Temperature is clearly above strike → YES should be ~0.95+
+                fair_value = min(0.95, 0.80 + (diff / 10.0) * 0.15)
+                if yes_ask < fair_value - 0.05:
+                    edge = (fair_value - yes_ask) * 100  # cents
+                    if edge >= self.min_edge_cents:
+                        return Signal(
+                            strategy="weather_arb",
+                            action=Side.BUY,
+                            contract_side=ContractSide.YES,
+                            platform=Platform.KALSHI,
+                            market_id=ticker,
+                            target_price=yes_ask,
+                            quantity=self._calculate_size(edge),
+                            confidence=min(0.95, 0.70 + diff * 0.05),
+                            reason=f"NOAA {station_id}: {observed:.1f}°F > strike {strike:.1f}°F by {diff:.1f}°",
+                        )
+
+            elif diff < -self.temp_confidence_margin:
+                # Temperature is clearly below strike → NO should be ~0.95+
+                fair_no = min(0.95, 0.80 + (abs(diff) / 10.0) * 0.15)
+                no_ask = 1.0 - yes_bid  # price to buy NO
+                if no_ask < fair_no - 0.05:
+                    edge = (fair_no - no_ask) * 100
+                    if edge >= self.min_edge_cents:
+                        return Signal(
+                            strategy="weather_arb",
+                            action=Side.BUY,
+                            contract_side=ContractSide.NO,
+                            platform=Platform.KALSHI,
+                            market_id=ticker,
+                            target_price=no_ask,
+                            quantity=self._calculate_size(edge),
+                            confidence=min(0.95, 0.70 + abs(diff) * 0.05),
+                            reason=f"NOAA {station_id}: {observed:.1f}°F < strike {strike:.1f}°F",
+                        )
+
+        elif market_type == "precipitation":
+            if observed is not None and observed > 0.01:
+                # Rain detected → YES
+                if yes_ask < 0.90:
+                    edge = (0.95 - yes_ask) * 100
+                    if edge >= self.min_edge_cents:
+                        return Signal(
+                            strategy="weather_arb",
+                            action=Side.BUY,
+                            contract_side=ContractSide.YES,
+                            platform=Platform.KALSHI,
+                            market_id=ticker,
+                            target_price=yes_ask,
+                            quantity=self._calculate_size(edge),
+                            confidence=0.90,
+                            reason=f"NOAA {station_id}: precip={observed:.2f}mm detected vs strike 0.01",
+                        )
+
+        return None
+
+    def _calculate_size(self, edge: float) -> int:
+        return max(1, min(100, int(edge * 2)))
+
+    def _parse_weather_market(
+        self, title: str, ticker: str
+    ) -> tuple[Optional[str], float, str]:
+        """
+        Parse a Kalshi weather market title to extract station and strike.
+        
+        Example titles:
+          "Temperature at JFK above 75°F at 2 PM ET"
+          "Precipitation at ORD above 0.01 in at 3 PM ET"
+        """
+        title_lower = title.lower()
+
+        # Determine station
+        station_id = None
+        for location, sid in STATION_MAP.items():
+            if location in title_lower:
+                station_id = sid
+                break
+        # Try airport codes
+        if not station_id:
+            for sid in STATION_MAP.values():
+                if sid.lower()[1:] in title_lower:  # "jfk" from "KJFK"
+                    station_id = sid
+                    break
+
+        # Determine market type and strike
+        market_type = ""
+        strike = 0.0
+
+        if "temperature" in title_lower or "temp" in title_lower:
+            market_type = "temperature"
+            # Extract strike from title (e.g. "above 75°F")
+            import re
+            match = re.search(r'above\s+([\d.]+)', title_lower)
+            if match:
+                strike = float(match.group(1))
+            else:
+                match = re.search(r'(\d+)\s*°', title)
+                if match:
+                    strike = float(match.group(1))
+
+        elif "precipitation" in title_lower or "rain" in title_lower or "precip" in title_lower:
+            market_type = "precipitation"
+            strike = 0.01  # Default: any measurable precipitation
+
+        return station_id, strike, market_type
+
+    def get_stats(self) -> dict:
+        return {
+            "active_markets": len(self._active_markets),
+            "signals_generated": len(self._signals_generated),
+            "stations_monitored": list(STATION_MAP.values()),
+        }

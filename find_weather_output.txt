@@ -1,0 +1,3 @@
+Total markets fetched: 600
+
+Found 0 weather-related markets:

@@ -1,0 +1,99 @@
+logs\bot_1775372476.log -> Risk: equity=$992.68 (peak=$1000.00, dd=0.73%), positions=1
+logs\bot_1775372476.log -> FILLED: buy 20 x KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 @ 0.3500 (fees=$0.3200)
+logs\bot_1775372476.log -> Risk: equity=$973.58 (peak=$1000.00, dd=2.64%), positions=2
+logs\bot_1775372476.log -> FILLED: buy 30 x KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 @ 0.6200 (fees=$0.5000)
+logs\bot_1775372476.log -> Risk: equity=$957.45 (peak=$1000.00, dd=4.26%), positions=3
+logs\bot_1775372476.log -> FILLED: buy 30 x KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 @ 0.5200 (fees=$0.5300)
+logs\bot_1775372476.log -> Risk: equity=$971.92 (peak=$1000.00, dd=2.81%), positions=3
+logs\bot_1775372476.log -> FILLED: sell 30 x KXTEMPNYCH-26APR0504-T36.99 @ 0.5000 (fees=$0.5300)
+logs\bot_1775372476.log -> Risk: equity=$986.39 (peak=$1000.00, dd=1.36%), positions=3
+logs\bot_1775372476.log -> FILLED: sell 30 x KXTEMPNYCH-26APR0504-T37.99 @ 0.5000 (fees=$0.5300)
+logs\bot_1775372476.log -> Risk: equity=$976.84 (peak=$1000.00, dd=2.32%), positions=4
+logs\bot_1775372476.log -> FILLED: buy 20 x KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 @ 0.4600 (fees=$0.3500)
+logs\bot_1775372476.log -> Risk: equity=$1004.98 (peak=$1004.98, dd=0.00%), positions=4
+logs\bot_1775372476.log -> FILLED: sell 50 x KXTEMPNYCH-26APR0504-T38.99 @ 0.5800 (fees=$0.8600)
+logs\bot_1775372476.log -> Risk: equity=$977.11 (peak=$1004.98, dd=2.77%), positions=5
+logs\bot_1775372476.log -> FILLED: buy 50 x KXTEMPNYCH-26APR0505-T42.99 @ 0.5400 (fees=$0.8700)
+logs\bot_1775372476.log -> Risk: equity=$971.08 (peak=$1004.98, dd=3.37%), positions=6
+logs\bot_1775372476.log -> FILLED: buy 30 x KXMLBHR-26APR051607SEALAA-SEAJRODRGUEZ44-1 @ 0.1900 (fees=$0.3300)
+logs\bot_1775372476.log -> Risk: equity=$972.48 (peak=$1004.98, dd=3.23%), positions=6
+logs\bot_1775372476.log -> FILLED: sell 30 x KXMLBHR-26APR051607SEALAA-SEACRALEIGH29-1 @ 0.0500 (fees=$0.1000)
+logs\bot_1775372476.log -> Risk: equity=$966.45 (peak=$1004.98, dd=3.83%), positions=7
+logs\bot_1775372476.log -> FILLED: buy 30 x KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 @ 0.1900 (fees=$0.3300)
+logs\bot_1775372476.log -> Portfolio: Ticker KXTEMPNYCH-26APR0505-T42.99 identified as closed.
+logs\bot_1775372476.log -> Risk: equity=$1007.31 (peak=$1016.45, dd=0.90%), positions=7
+logs\bot_1775372476.log -> FILLED: buy 30 x KXTEMPNYCH-26APR0506-T43.99 @ 0.2900 (fees=$0.4400)
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-SEAJRODRGUEZ44-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXTEMPNYCH-26APR0506-T43.99 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-SEAJRODRGUEZ44-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXTEMPNYCH-26APR0506-T43.99 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-SEAJRODRGUEZ44-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Portfolio: Market KXTEMPNYCH-26APR0506-T43.99 not found on Kalshi, keeping in limbo.
+logs\bot_1775372476.log -> Risk: equity=$1015.96 (peak=$1016.45, dd=0.05%), positions=7
+logs\bot_1775372476.log -> FILLED: sell 20 x KXMLBSPREAD-26APR051335BALPIT-PIT6 @ 0.4500 (fees=$0.3500)
+logs\bot_1775372476.log -> Risk: equity=$1026.61 (peak=$1026.61, dd=0.00%), positions=7
+logs\bot_1775372476.log -> FILLED: sell 20 x KXMLBSPREAD-26APR051335BALPIT-PIT5 @ 0.5500 (fees=$0.3500)
+logs\bot_1775372476.log -> Risk: equity=$1042.89 (peak=$1042.89, dd=0.00%), positions=7
+logs\bot_1775372476.log -> FILLED: sell 30 x KXMLBSPREAD-26APR051335BALPIT-PIT7 @ 0.5600 (fees=$0.5200)
+logs\bot_1775372522.log -> Risk: equity=$992.68 (peak=$1000.00, dd=0.73%), positions=1
+logs\bot_1775372522.log -> FILLED: buy 20 x KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 @ 0.3500 (fees=$0.3200)
+logs\bot_1775372522.log -> Risk: equity=$973.58 (peak=$1000.00, dd=2.64%), positions=2
+logs\bot_1775372522.log -> FILLED: buy 30 x KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 @ 0.6200 (fees=$0.5000)
+logs\bot_1775372522.log -> Risk: equity=$957.45 (peak=$1000.00, dd=4.26%), positions=3
+logs\bot_1775372522.log -> FILLED: buy 30 x KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 @ 0.5200 (fees=$0.5300)
+logs\bot_1775372522.log -> Risk: equity=$967.10 (peak=$1000.00, dd=3.29%), positions=3
+logs\bot_1775372522.log -> FILLED: sell 20 x KXTEMPNYCH-26APR0504-T37.99 @ 0.5000 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$976.95 (peak=$1000.00, dd=2.31%), positions=3
+logs\bot_1775372522.log -> FILLED: sell 20 x KXTEMPNYCH-26APR0504-T36.99 @ 0.5100 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$967.40 (peak=$1000.00, dd=3.26%), positions=4
+logs\bot_1775372522.log -> FILLED: buy 20 x KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 @ 0.4600 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$995.54 (peak=$1000.00, dd=0.45%), positions=4
+logs\bot_1775372522.log -> FILLED: sell 50 x KXTEMPNYCH-26APR0504-T38.99 @ 0.5800 (fees=$0.8600)
+logs\bot_1775372522.log -> Risk: equity=$967.67 (peak=$1000.00, dd=3.23%), positions=5
+logs\bot_1775372522.log -> FILLED: buy 50 x KXTEMPNYCH-26APR0505-T42.99 @ 0.5400 (fees=$0.8700)
+logs\bot_1775372522.log -> Risk: equity=$961.02 (peak=$1000.00, dd=3.90%), positions=6
+logs\bot_1775372522.log -> FILLED: buy 30 x KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 @ 0.2100 (fees=$0.3500)
+logs\bot_1775372522.log -> Portfolio: Ticker KXTEMPNYCH-26APR0505-T42.99 identified as closed.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-20 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAPTS-26APR05LACSAC-SACDDEROZAN10-15 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHIT-26APR051410TBMIN-MINRLEWIS23-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXNBAAST-26APR05INDCLE-CLEDSCHRODER8-4 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Portfolio: Market KXMLBHR-26APR051607SEALAA-LAAMTROUT27-1 not found on Kalshi, keeping in limbo.
+logs\bot_1775372522.log -> Risk: equity=$1019.67 (peak=$1019.67, dd=0.00%), positions=5
+logs\bot_1775372522.log -> FILLED: sell 20 x KXMLBSPREAD-26APR051335BALPIT-PIT6 @ 0.4500 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$1028.12 (peak=$1028.12, dd=0.00%), positions=5
+logs\bot_1775372522.log -> FILLED: sell 20 x KXNHLGOAL-26APR05NJMTL-MTLCCAUFIELD13-1 @ 0.4400 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$1038.77 (peak=$1038.77, dd=0.00%), positions=5
+logs\bot_1775372522.log -> FILLED: sell 20 x KXMLBSPREAD-26APR051335BALPIT-PIT5 @ 0.5500 (fees=$0.3500)
+logs\bot_1775372522.log -> Risk: equity=$1055.05 (peak=$1055.05, dd=0.00%), positions=5
+logs\bot_1775372522.log -> FILLED: sell 30 x KXMLBSPREAD-26APR051335BALPIT-PIT7 @ 0.5600 (fees=$0.5200)

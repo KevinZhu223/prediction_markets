@@ -1,0 +1,38 @@
+============================================================
+  Strategies V2 -- Expansion Module Tests
+============================================================
+
+=== Test 1: Weather Arb (NOAA) ===
+  [PASS] NOAA fetch KJFK observation -- temp=51.8F, station=KJFK
+  [PASS] NOAA fetch KORD observation -- temp=51.8F
+  [PASS] NOAA recent observations -- got 3 observations
+  [PASS] Weather signal: temp above strike -> BUY_YES -- conf=0.95
+  [PASS] Weather signal: temp below strike -> BUY_NO -- Signal success
+  [PASS] Weather market parser -- station=KJFK, strike=75.0, type=temperature
+
+=== Test 2: Macro News Sniper ===
+  [FAIL] BLS CPI page reachable -- status=403
+  [PASS] Macro signal: CPI above consensus -> BUY_YES -- actual=3.5 vs consensus=3.0
+  [PASS] Macro signal: CPI below consensus -> BUY_NO -- Signal success
+  [PASS] Macro: no signal on tiny surprise -- correctly suppressed
+
+=== Test 3: Equity Index Arb ===
+  [PASS] Yahoo Finance S&P 500 -- SPX=6582.7, change=0.11%
+  [PASS] Yahoo Finance Nasdaq-100 -- NDX=24045.5
+  [PASS] Index signal: SPX above strike -> BUY_YES -- Signal success
+  [PASS] Index signal: SPX below strike -> BUY_NO -- Signal success
+  [PASS] Strike parser -- parsed=5200.0
+
+=== Test 4: Transcript Sniper ===
+  [PASS] Keyword matcher: finds 'Elon Musk' -- matched='Elon Musk'
+  [PASS] Keyword matcher: no false positive
+  [PASS] Transcript simulation: detect mention -> signal -- reason='Simulated: "Elon Musk" found in text', action=buy
+  [PASS] Title keyword extraction -- extracted=['Taylor Swift']
+  [PASS] No duplicate detection -- correctly suppressed duplicate
+
+============================================================
+  Results: 19 passed, 1 failed, 0 skipped / 20 total
+============================================================
+
+  FAILED tests:
+    - BLS CPI page reachable

@@ -1,0 +1,19 @@
+# Core
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+websockets>=12.0
+pydantic>=2.0
+
+# Kalshi
+cryptography>=42.0
+httpx>=0.27
+
+# Data & Analytics
+numpy>=1.26
+pandas>=2.1
+
+# OpenAI LLM
+openai>=1.30
+
+# Logging
+rich>=13.7

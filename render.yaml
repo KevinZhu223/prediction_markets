@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: prediction-bot-main
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: false
+  
+  - type: worker
+    name: prediction-bot-experimental
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main_experimental.py
+    autoDeploy: false
