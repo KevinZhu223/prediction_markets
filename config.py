@@ -41,6 +41,12 @@ class Config:
     MAX_SECTOR_PCT: float = float(os.getenv("MAX_SECTOR_PCT", "0.30"))
     MAX_DRAWDOWN_PCT: float = float(os.getenv("MAX_DRAWDOWN_PCT", "0.15"))
     KELLY_FRACTION: float = float(os.getenv("KELLY_FRACTION", "0.50"))
+    MIN_SIGNAL_CONFIDENCE: float = float(os.getenv("MIN_SIGNAL_CONFIDENCE", "0.20"))
+    RISK_TEST_MODE: bool = os.getenv("RISK_TEST_MODE", "true").lower() == "true"
+    TEST_MAX_POSITION_PCT: float = float(os.getenv("TEST_MAX_POSITION_PCT", "0.10"))
+    TEST_MAX_DRAWDOWN_PCT: float = float(os.getenv("TEST_MAX_DRAWDOWN_PCT", "0.35"))
+    TEST_KELLY_FRACTION: float = float(os.getenv("TEST_KELLY_FRACTION", "0.75"))
+    TRADE_JOURNAL_ENABLED: bool = os.getenv("TRADE_JOURNAL_ENABLED", "true").lower() == "true"
     MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.02"))
 
     # ── Latency Arb Specific ────────────────────────────────────────────

@@ -89,6 +89,8 @@ def render_dashboard(
     table.add_row("Drawdown", f"{risk_stats['drawdown_pct']:.2f}%")
     table.add_row("Positions", str(risk_stats['positions']))
     table.add_row("Total Fees", f"${risk_stats['total_fees']:.4f}")
+    table.add_row("Settlements Collected", f"${risk_stats.get('settlements_collected', 0.0):.2f}")
+    table.add_row("Open Cost Basis", f"${risk_stats.get('open_notional_cost_basis', 0.0):.2f}")
     cb_status = "ACTIVE" if risk_stats['circuit_breaker_active'] else "OK"
     table.add_row("Circuit Breaker", cb_status)
 
@@ -199,7 +201,11 @@ async def main():
         jump_threshold=Config.SPOT_PRICE_JUMP_THRESHOLD,
     )
     aggregator = DataAggregator(kalshi, crypto_feed)
-    risk_manager = RiskManager(initial_equity=1000.0)
+    risk_manager = RiskManager(
+        initial_equity=1000.0,
+        state_file="logs/portfolio_experimental.json",
+        session_name="main_experimental",
+    )
     executor = Executor(kalshi, risk_manager)
 
     # V1 Strategies

@@ -6,6 +6,7 @@ Run with: python test_bot.py
 import asyncio
 import sys
 import time
+from pathlib import Path
 
 sys.path.insert(0, ".")
 
@@ -56,7 +57,15 @@ def test_config():
 
 def test_risk_manager():
     print("\n=== Test 2: Risk Manager ===")
-    rm = RiskManager(initial_equity=1000.0)
+    state_path = Path("logs/test_portfolio_state.json")
+    if state_path.exists():
+        state_path.unlink()
+
+    rm = RiskManager(
+        initial_equity=1000.0,
+        state_file=str(state_path),
+        session_name="test_suite",
+    )
 
     # Test Kelly sizing
     signal = Signal(
@@ -78,13 +87,14 @@ def test_risk_manager():
     low_conf_signal = Signal(
         strategy="test", action=Side.BUY, contract_side=ContractSide.YES,
         platform=Platform.KALSHI, market_id="TEST-LOW", target_price=0.50, quantity=10,
-        confidence=0.20, reason="low confidence",
+        confidence=max(0.0, rm.min_signal_confidence - 0.05), reason="low confidence",
     )
     approved_low, reason_low, _ = rm.validate_signal(low_conf_signal)
     report("Low confidence rejected", not approved_low, f"reason={reason_low}")
 
     # Test drawdown circuit breaker
-    rm.current_equity = 800.0  # 20% drawdown
+    trigger_drawdown = min(rm.max_drawdown_pct + 0.05, 0.95)
+    rm.current_equity = rm.peak_equity * (1 - trigger_drawdown)
     approved_dd, reason_dd, _ = rm.validate_signal(signal)
     report("Drawdown circuit breaker triggers", not approved_dd, f"reason={reason_dd}")
 
@@ -108,6 +118,14 @@ def test_risk_manager():
     stats = rm.get_stats()
     report("Stats generation works", "equity" in stats and "pnl" in stats,
            f"equity={stats['equity']}")
+    report(
+        "Telemetry stats available",
+        "open_notional_cost_basis" in stats and "risk_profile" in stats,
+        f"profile={stats.get('risk_profile')}",
+    )
+
+    if state_path.exists():
+        state_path.unlink()
 
 
 # -- Test 3: Kalshi Connection -----------------------------------------------

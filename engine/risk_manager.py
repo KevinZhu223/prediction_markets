@@ -9,11 +9,14 @@ Core idea from research:
    loss can wipe out weeks of gains."
 """
 
+from __future__ import annotations
+
 import logging
-import time
 import os
 import json
-from typing import Optional
+import time
+from pathlib import Path
+from typing import Optional, Any
 
 from config import Config
 from models import Signal, Position, Fill, Platform, Side, ContractSide
@@ -27,11 +30,32 @@ class RiskManager:
     Enforces portfolio constraints and dynamic risk limits.
     """
 
-    def __init__(self, initial_equity: float = 1000.0, state_file: str = "portfolio.json"):
+    def __init__(
+        self,
+        initial_equity: float = 1000.0,
+        state_file: str = "portfolio.json",
+        session_name: str = "default",
+    ):
+        self.session_name = session_name
         self.state_file = state_file
+        self._state_path = Path(state_file)
         self.initial_equity = initial_equity
         self.current_equity = initial_equity
         self.peak_equity = initial_equity
+        self._session_started_at = time.time()
+
+        # Effective risk limits. In paper testing, we can relax limits to evaluate strategy signal quality faster.
+        self.min_signal_confidence = Config.MIN_SIGNAL_CONFIDENCE
+        self.max_position_pct = Config.MAX_POSITION_PCT
+        self.max_drawdown_pct = Config.MAX_DRAWDOWN_PCT
+        self.kelly_fraction = Config.KELLY_FRACTION
+        self.risk_profile = "base"
+
+        if Config.PAPER_TRADING and Config.RISK_TEST_MODE:
+            self.max_position_pct = max(self.max_position_pct, Config.TEST_MAX_POSITION_PCT)
+            self.max_drawdown_pct = max(self.max_drawdown_pct, Config.TEST_MAX_DRAWDOWN_PCT)
+            self.kelly_fraction = max(self.kelly_fraction, Config.TEST_KELLY_FRACTION)
+            self.risk_profile = "testing-relaxed"
 
         # Active positions: dict[(market_id, contract_side), Position]
         self._positions: dict[tuple[str, ContractSide], Position] = {}
@@ -39,6 +63,8 @@ class RiskManager:
         # Trade history for P&L tracking
         self._fills: list[Fill] = []
         self._settlements_collected: float = 0.0
+        self._gross_buy_notional: float = 0.0
+        self._gross_sell_notional: float = 0.0
 
         # Sector exposure tracking
         self._sector_exposure: dict[str, float] = {}
@@ -51,20 +77,95 @@ class RiskManager:
 
         # Pending signals currently in flight to the executor
         self._pending_signals: dict[tuple[str, ContractSide], int] = {}
-        
+
+        # Runtime telemetry files for VM monitoring.
+        self._journal_enabled = Config.TRADE_JOURNAL_ENABLED
+        self._journal_path: Optional[Path] = None
+        self._summary_path: Optional[Path] = None
+
+        self._ensure_state_parent()
         self.load_state()
+        self._init_journal_files()
+        self._write_journal_event(
+            "session_start",
+            {
+                "state_file": str(self._state_path),
+                "risk_profile": self.risk_profile,
+                "limits": {
+                    "min_signal_confidence": self.min_signal_confidence,
+                    "max_position_pct": self.max_position_pct,
+                    "max_drawdown_pct": self.max_drawdown_pct,
+                    "kelly_fraction": self.kelly_fraction,
+                },
+            },
+        )
+
+    def _ensure_state_parent(self):
+        parent = self._state_path.parent
+        if str(parent) and str(parent) != ".":
+            parent.mkdir(parents=True, exist_ok=True)
+
+    def _init_journal_files(self):
+        if not self._journal_enabled:
+            return
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        run_id = int(time.time())
+        self._journal_path = log_dir / f"trade_journal_{self.session_name}_{run_id}.jsonl"
+        self._summary_path = log_dir / f"trade_summary_{self.session_name}.json"
+        logger.info("Trade journal: %s", self._journal_path)
+        self._write_summary_snapshot()
+
+    def _write_summary_snapshot(self):
+        if not self._summary_path:
+            return
+        try:
+            payload = {
+                "updated_at": time.time(),
+                "session_name": self.session_name,
+                **self.get_stats(),
+            }
+            with open(self._summary_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.error("Failed to write trade summary snapshot: %s", e)
+
+    def _write_journal_event(self, event_type: str, payload: dict[str, Any]):
+        if not self._journal_enabled or not self._journal_path:
+            return
+        try:
+            event = {
+                "ts": time.time(),
+                "session_name": self.session_name,
+                "event_type": event_type,
+                "equity": self.current_equity,
+                "peak_equity": self.peak_equity,
+                "pnl": self.current_equity - self.initial_equity,
+                "drawdown_pct": self._current_drawdown() * 100,
+                "open_positions": len(self._positions),
+                "payload": payload,
+            }
+            with open(self._journal_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(event, separators=(",", ":"), sort_keys=True) + "\n")
+            self._write_summary_snapshot()
+        except Exception as e:
+            logger.error("Failed to write trade journal event: %s", e)
+
+    def _position_cost_basis(self) -> float:
+        return sum(pos.avg_price * pos.quantity for pos in self._positions.values())
 
     def load_state(self):
         """Loads equity and open positions from the state JSON file if it exists."""
-        if os.path.exists(self.state_file):
+        if self._state_path.exists():
             try:
-                with open(self.state_file, "r") as f:
+                with open(self._state_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    
+
                 self.initial_equity = data.get("initial_equity", self.initial_equity)
                 self.current_equity = data.get("current_equity", self.initial_equity)
                 self.peak_equity = data.get("peak_equity", self.initial_equity)
-                
+                self._settlements_collected = float(data.get("settlements_collected", 0.0) or 0.0)
+
                 positions_data = data.get("positions", [])
                 for p_data in positions_data:
                     try:
@@ -80,7 +181,7 @@ class RiskManager:
                         )
                     except Exception as e:
                         logger.error("Error loading position %s: %s", p_data.get("market_id"), e)
-                        
+
                 logger.info("Loaded portfolio state from %s (Equity: $%.2f)", self.state_file, self.current_equity)
             except Exception as e:
                 logger.error("Failed to load portfolio state: %s", e)
@@ -103,9 +204,11 @@ class RiskManager:
                 "initial_equity": self.initial_equity,
                 "current_equity": self.current_equity,
                 "peak_equity": self.peak_equity,
+                "settlements_collected": self._settlements_collected,
+                "updated_at": time.time(),
                 "positions": positions_data
             }
-            with open(self.state_file, "w") as f:
+            with open(self._state_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=4)
         except Exception as e:
             logger.error("Failed to save portfolio state: %s", e)
@@ -122,21 +225,21 @@ class RiskManager:
             return False, "Circuit breaker active: max drawdown exceeded", 0
 
         drawdown = self._current_drawdown()
-        if drawdown >= Config.MAX_DRAWDOWN_PCT:
+        if drawdown >= self.max_drawdown_pct:
             self._max_drawdown_hit = True
             logger.critical(
                 "CIRCUIT BREAKER: Drawdown %.2f%% >= %.2f%% limit",
-                drawdown * 100, Config.MAX_DRAWDOWN_PCT * 100,
+                drawdown * 100, self.max_drawdown_pct * 100,
             )
             return False, f"Max drawdown {drawdown:.2%} exceeded", 0
 
-        # Minimum confidence threshold (Lowered to 0.30 to see more activity)
-        if signal.confidence < 0.30:
-            return False, f"Confidence {signal.confidence:.2f} below 0.30 threshold", 0
+        # Minimum confidence threshold
+        if signal.confidence < self.min_signal_confidence:
+            return False, f"Confidence {signal.confidence:.2f} below {self.min_signal_confidence:.2f} threshold", 0
 
         # Position size check
         trade_value = signal.target_price * signal.quantity
-        max_position_value = self.current_equity * Config.MAX_POSITION_PCT
+        max_position_value = self.current_equity * self.max_position_pct
         adjusted_qty = signal.quantity
 
         if trade_value > max_position_value:
@@ -144,7 +247,7 @@ class RiskManager:
             logger.info(
                 "Risk: sizing %s from %d to %d (max position %.2f%%)",
                 signal.market_id, signal.quantity, adjusted_qty,
-                Config.MAX_POSITION_PCT * 100,
+                self.max_position_pct * 100,
             )
 
         # Kelly Criterion sizing
@@ -217,7 +320,7 @@ class RiskManager:
             return 0
 
         # Quarter Kelly
-        quarter_kelly = full_kelly * Config.KELLY_FRACTION
+        quarter_kelly = full_kelly * self.kelly_fraction
 
         # Convert to contract count
         kelly_value = self.current_equity * quarter_kelly
@@ -243,6 +346,12 @@ class RiskManager:
         self._fills.append(fill)
         key = fill.order.market_id
         pos_key = (fill.order.market_id, fill.order.contract_side)
+        notional = fill.fill_price * fill.fill_quantity
+
+        if fill.order.side == Side.BUY:
+            self._gross_buy_notional += notional
+        else:
+            self._gross_sell_notional += notional
 
         # Clear pending count for this market
         if pos_key in self._pending_signals:
@@ -287,9 +396,25 @@ class RiskManager:
             self._current_drawdown() * 100, len(self._positions),
         )
         self.save_state()
+        self._write_journal_event(
+            "fill",
+            {
+                "market_id": fill.order.market_id,
+                "platform": fill.order.platform.value,
+                "side": fill.order.side.value,
+                "contract_side": fill.order.contract_side.value,
+                "fill_quantity": fill.fill_quantity,
+                "fill_price": fill.fill_price,
+                "notional": notional,
+                "fees": fill.fees,
+                "open_notional_cost_basis": self._position_cost_basis(),
+            },
+        )
 
     def record_settlement(self, market_id: str, payout_per_contract: float):
         """Record a market settlement (contract resolved)."""
+        settlement_events: list[dict[str, Any]] = []
+
         # Settle YES
         yes_key = (market_id, ContractSide.YES)
         if yes_key in self._positions:
@@ -300,6 +425,15 @@ class RiskManager:
             self.peak_equity = max(self.peak_equity, self.current_equity)
             del self._positions[yes_key]
             logger.info("Settlement: %s (YES) paid $%.2f", market_id, payout)
+            settlement_events.append(
+                {
+                    "market_id": market_id,
+                    "contract_side": ContractSide.YES.value,
+                    "quantity": pos.quantity,
+                    "payout_per_contract": payout_per_contract,
+                    "payout": payout,
+                }
+            )
             
         # Settle NO
         no_key = (market_id, ContractSide.NO)
@@ -313,8 +447,19 @@ class RiskManager:
             self.peak_equity = max(self.peak_equity, self.current_equity)
             del self._positions[no_key]
             logger.info("Settlement: %s (NO) paid $%.2f", market_id, payout)
+            settlement_events.append(
+                {
+                    "market_id": market_id,
+                    "contract_side": ContractSide.NO.value,
+                    "quantity": pos.quantity,
+                    "payout_per_contract": no_payout_per_contract,
+                    "payout": payout,
+                }
+            )
 
         self.save_state()
+        for event in settlement_events:
+            self._write_journal_event("settlement", event)
 
 
     def record_failure(
@@ -330,6 +475,14 @@ class RiskManager:
                 self._pending_signals[key] = max(0, self._pending_signals[key] - quantity)
                 if self._pending_signals[key] <= 0:
                     del self._pending_signals[key]
+            self._write_journal_event(
+                "order_failure",
+                {
+                    "market_id": market_id,
+                    "quantity": quantity,
+                    "contract_side": contract_side.value,
+                },
+            )
             return
 
         # Fallback for legacy call sites: release all pending entries for this market.
@@ -338,6 +491,15 @@ class RiskManager:
             self._pending_signals[key] = max(0, self._pending_signals[key] - quantity)
             if self._pending_signals[key] <= 0:
                 del self._pending_signals[key]
+
+        self._write_journal_event(
+            "order_failure",
+            {
+                "market_id": market_id,
+                "quantity": quantity,
+                "contract_side": "unknown",
+            },
+        )
 
     # ── Toxic flow detection ────────────────────────────────────────────
 
@@ -385,6 +547,7 @@ class RiskManager:
     def get_stats(self) -> dict:
         total_fees = sum(f.fees for f in self._fills)
         total_trades = len(self._fills)
+        open_notional_cost_basis = self._position_cost_basis()
         active_positions = [
             {
                 "market_id": pos.market_id,
@@ -404,6 +567,19 @@ class RiskManager:
             "active_positions": active_positions,
             "total_trades": total_trades,
             "total_fees": total_fees,
+            "gross_buy_notional": self._gross_buy_notional,
+            "gross_sell_notional": self._gross_sell_notional,
+            "open_notional_cost_basis": open_notional_cost_basis,
+            "settlements_collected": self._settlements_collected,
+            "risk_profile": self.risk_profile,
+            "min_signal_confidence": self.min_signal_confidence,
+            "max_position_pct": self.max_position_pct,
+            "max_drawdown_limit_pct": self.max_drawdown_pct * 100,
+            "kelly_fraction": self.kelly_fraction,
+            "session_uptime_seconds": int(max(0.0, time.time() - self._session_started_at)),
+            "state_file": str(self._state_path),
+            "journal_file": str(self._journal_path) if self._journal_path else None,
+            "summary_file": str(self._summary_path) if self._summary_path else None,
             "pnl": self.current_equity - self.initial_equity,
             "pnl_pct": ((self.current_equity / self.initial_equity) - 1) * 100
             if self.initial_equity > 0 else 0,
