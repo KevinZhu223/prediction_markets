@@ -84,6 +84,13 @@ class AIMarketScanner:
         self._daily_usage_date = time.strftime("%Y-%m-%d")
         self._market_last_eval: dict[str, float] = {}
         self._scanner_lock_name = "ai_scanner_llm"
+        self._openai_cooldown_until = 0.0
+        self._last_openai_cooldown_log = 0.0
+        self._openai_min_confidence = 0.65
+        self._openai_min_call_spacing_seconds = max(
+            0.25,
+            min(2.0, self.scan_interval / max(1, self.max_markets_per_scan)),
+        )
 
         # Track all signals generated
         self._signals_generated: list[Signal] = []
@@ -155,6 +162,16 @@ class AIMarketScanner:
 
         signals = []
 
+        now = time.time()
+        if now < self._openai_cooldown_until:
+            if now - self._last_openai_cooldown_log >= 30:
+                logger.info(
+                    "AI scanner: OpenAI cooldown active for %.0fs",
+                    self._openai_cooldown_until - now,
+                )
+                self._last_openai_cooldown_log = now
+            return []
+
         try:
             markets = await self.kalshi.fetch_markets()
             self._markets_scanned = len(markets)
@@ -198,7 +215,15 @@ class AIMarketScanner:
 
             for market in candidates[: self.max_markets_per_scan]:
                 if not self._can_make_openai_call():
-                    logger.warning("AI scanner: OpenAI budget reached, pausing evaluations")
+                    pause_seconds = self._seconds_until_next_openai_slot()
+                    if self._daily_tokens_used >= self._daily_token_budget:
+                        pause_seconds = max(pause_seconds, max(self.scan_interval, 60.0))
+                    pause_seconds = max(5.0, pause_seconds)
+                    self._set_openai_cooldown(pause_seconds)
+                    logger.warning(
+                        "AI scanner: OpenAI budget reached, cooling down %.0fs",
+                        pause_seconds,
+                    )
                     break
 
                 ticker = market.get("ticker", "")
@@ -213,7 +238,10 @@ class AIMarketScanner:
                     self._signaled_markets.add(ticker)
 
                 # Rate limit OpenAI calls
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(self._openai_min_call_spacing_seconds)
+
+                if time.time() < self._openai_cooldown_until:
+                    break
 
         except Exception as e:
             logger.error("Market scan failed: %s", e)
@@ -283,12 +311,15 @@ Return compact JSON only. Keep reasoning <= 25 words."""
             self._register_openai_usage(total_tokens)
 
             result = json.loads(response.choices[0].message.content)
-            fair_prob = result.get("fair_probability", market_prob)
-            confidence = result.get("confidence", 0.5)
+            fair_prob = float(result.get("fair_probability", market_prob))
+            fair_prob = min(0.99, max(0.01, fair_prob))
+            confidence = float(result.get("confidence", 0.5))
+            confidence = min(1.0, max(0.0, confidence))
             direction = result.get("edge_direction", "FAIR")
             reasoning = result.get("reasoning", "")
 
             edge = abs(fair_prob - market_prob)
+            required_confidence = 0.60 if edge >= 0.12 else self._openai_min_confidence
 
             logger.info(
                 "AI scan %s: market=%.1f%%, fair=%.1f%%, edge=%.1f%%, dir=%s — %s",
@@ -297,7 +328,7 @@ Return compact JSON only. Keep reasoning <= 25 words."""
             )
 
             signal = None
-            if edge >= self.min_edge and confidence >= 0.6 and direction != "FAIR":
+            if edge >= self.min_edge and confidence >= required_confidence and direction != "FAIR":
                 if direction == "UNDER":
                     # Market is underpriced → buy YES
                     signal = Signal(
@@ -352,6 +383,17 @@ Return compact JSON only. Keep reasoning <= 25 words."""
             logger.error("AI scanner: invalid JSON from LLM: %s", e)
             return None
         except Exception as e:
+            status_code = getattr(e, "status_code", None)
+            msg = str(e).lower()
+            if status_code == 429 or "rate limit" in msg or "429" in msg:
+                cooldown = max(15.0, self.scan_interval * 2)
+                self._set_openai_cooldown(cooldown)
+                logger.warning(
+                    "AI scanner: OpenAI rate limited for %s, cooling down %.0fs",
+                    ticker,
+                    cooldown,
+                )
+                return None
             logger.error("AI scanner: evaluation failed for %s: %s", ticker, e)
             return None
 
@@ -412,6 +454,21 @@ Return compact JSON only. Keep reasoning <= 25 words."""
         self._refresh_usage_windows()
         self._hourly_call_timestamps.append(time.time())
         self._daily_tokens_used += max(0, total_tokens)
+
+    def _seconds_until_next_openai_slot(self) -> float:
+        self._refresh_usage_windows()
+        if len(self._hourly_call_timestamps) < self._max_calls_per_hour:
+            return 0.0
+        oldest_call = self._hourly_call_timestamps[0]
+        return max(0.0, 3600.0 - (time.time() - oldest_call))
+
+    def _set_openai_cooldown(self, seconds: float):
+        if seconds <= 0:
+            return
+        self._openai_cooldown_until = max(
+            self._openai_cooldown_until,
+            time.time() + seconds,
+        )
 
     def _size_for_edge(self, edge: float, confidence: float) -> int:
         """Size based on edge and confidence."""

@@ -9,6 +9,7 @@ import logging
 import time
 from typing import Optional
 
+from config import Config
 from models import OrderBook, SpotPriceUpdate, Platform
 from exchanges.base import ExchangeBase
 from data.crypto_feed import CryptoFeed
@@ -37,6 +38,9 @@ class DataAggregator:
         # Latest spot prices indexed by symbol
         self._spot_prices: dict[str, SpotPriceUpdate] = {}
 
+        self._orderbook_max_age_seconds = max(0.5, Config.ORDERBOOK_MAX_AGE_SECONDS)
+        self._spot_max_age_seconds = max(0.5, Config.SPOT_PRICE_MAX_AGE_SECONDS)
+
         # Callbacks
         self._ob_callbacks = []
         self._spot_callbacks = []
@@ -57,11 +61,28 @@ class DataAggregator:
             except Exception as e:
                 logger.error("OB callback error: %s", e)
 
-    def get_order_book(self, market_id: str) -> Optional[OrderBook]:
-        return self._order_books.get(market_id)
+    def get_order_book(self, market_id: str, max_age_seconds: Optional[float] = None) -> Optional[OrderBook]:
+        ob = self._order_books.get(market_id)
+        if not ob:
+            return None
 
-    def get_all_order_books(self) -> dict[str, OrderBook]:
-        return dict(self._order_books)
+        max_age = self._orderbook_max_age_seconds if max_age_seconds is None else max(0.0, max_age_seconds)
+        if (time.time() - ob.timestamp) > max_age:
+            logger.debug("Aggregator: stale order book for %s (age=%.2fs)", market_id, time.time() - ob.timestamp)
+            return None
+        return ob
+
+    def get_all_order_books(self, include_stale: bool = False) -> dict[str, OrderBook]:
+        if include_stale:
+            return dict(self._order_books)
+
+        now = time.time()
+        max_age = self._orderbook_max_age_seconds
+        return {
+            market_id: ob
+            for market_id, ob in self._order_books.items()
+            if (now - ob.timestamp) <= max_age
+        }
 
     # ── Spot price management ───────────────────────────────────────────
 
@@ -73,9 +94,16 @@ class DataAggregator:
             except Exception as e:
                 logger.error("Spot callback error: %s", e)
 
-    def get_spot_price(self, symbol: str) -> Optional[float]:
+    def get_spot_price(self, symbol: str, max_age_seconds: Optional[float] = None) -> Optional[float]:
         update = self._spot_prices.get(symbol.upper())
-        return update.price if update else None
+        if not update:
+            return None
+
+        max_age = self._spot_max_age_seconds if max_age_seconds is None else max(0.0, max_age_seconds)
+        if (time.time() - update.timestamp) > max_age:
+            logger.debug("Aggregator: stale spot update for %s (age=%.2fs)", symbol.upper(), time.time() - update.timestamp)
+            return None
+        return update.price
 
     # ── Polling loop for Kalshi order books ─────────────────────────────
 

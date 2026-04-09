@@ -8,6 +8,7 @@ import asyncio
 import base64
 import json
 import logging
+import random
 import time
 import uuid
 from pathlib import Path
@@ -41,6 +42,9 @@ class KalshiExchange(ExchangeBase):
         self._private_key_path = private_key_path or Config.KALSHI_PRIVATE_KEY_PATH
         self._private_key = None
         self._client: Optional[httpx.AsyncClient] = None
+        self._request_semaphore = asyncio.Semaphore(
+            max(1, Config.KALSHI_MAX_CONCURRENT_REQUESTS)
+        )
 
     # ── Auth helpers ────────────────────────────────────────────────────
 
@@ -93,33 +97,125 @@ class KalshiExchange(ExchangeBase):
 
     # ── REST helpers ────────────────────────────────────────────────────
 
+    @staticmethod
+    def _is_retryable_status(status_code: int) -> bool:
+        return status_code in (429, 500, 502, 503, 504)
+
+    def _backoff_seconds(self, attempt: int) -> float:
+        base = max(0.05, Config.KALSHI_HTTP_BACKOFF_BASE_SECONDS)
+        cap = max(base, Config.KALSHI_HTTP_BACKOFF_MAX_SECONDS)
+        jitter = max(0.0, Config.KALSHI_HTTP_JITTER_SECONDS)
+
+        delay = min(cap, base * (2 ** attempt))
+        if jitter > 0:
+            delay += random.uniform(0.0, jitter)
+        return delay
+
+    async def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: Optional[dict] = None,
+        body: Optional[dict] = None,
+        expected_statuses: tuple[int, ...] = (200,),
+    ) -> dict:
+        if not self._client:
+            raise RuntimeError("Kalshi client is not connected")
+
+        retries = max(0, Config.KALSHI_HTTP_MAX_RETRIES)
+        last_error: Optional[Exception] = None
+
+        for attempt in range(retries + 1):
+            try:
+                headers = self._auth_headers(method, path)
+                async with self._request_semaphore:
+                    resp = await self._client.request(
+                        method=method,
+                        url=path,
+                        headers=headers,
+                        params=params,
+                        json=body,
+                    )
+            except (
+                httpx.TimeoutException,
+                httpx.NetworkError,
+                httpx.ConnectError,
+                httpx.RemoteProtocolError,
+            ) as e:
+                last_error = e
+                if attempt < retries:
+                    delay = self._backoff_seconds(attempt)
+                    logger.warning(
+                        "Kalshi %s %s network error (%s), retrying in %.2fs (%d/%d)",
+                        method,
+                        path,
+                        type(e).__name__,
+                        delay,
+                        attempt + 1,
+                        retries,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+            if resp.status_code in expected_statuses:
+                if not resp.content:
+                    return {}
+                return resp.json()
+
+            if resp.status_code in (401, 403) and attempt < retries:
+                delay = self._backoff_seconds(attempt)
+                logger.warning(
+                    "Kalshi %s %s auth failed (%d), retrying with fresh signature in %.2fs (%d/%d)",
+                    method,
+                    path,
+                    resp.status_code,
+                    delay,
+                    attempt + 1,
+                    retries,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            if self._is_retryable_status(resp.status_code) and attempt < retries:
+                delay = self._backoff_seconds(attempt)
+                logger.warning(
+                    "Kalshi %s %s returned %d, retrying in %.2fs (%d/%d)",
+                    method,
+                    path,
+                    resp.status_code,
+                    delay,
+                    attempt + 1,
+                    retries,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            logger.error(
+                "Kalshi %s %s failed (%d): %s",
+                method,
+                path,
+                resp.status_code,
+                resp.text[:400],
+            )
+            resp.raise_for_status()
+
+        if last_error is not None:
+            raise last_error
+
+        raise RuntimeError(f"Kalshi {method} {path} request failed")
+
     async def _get(self, path: str, params: Optional[dict] = None) -> dict:
         """Perform a signed GET request."""
-        headers = self._auth_headers("GET", path)
-        resp = await self._client.get(path, headers=headers, params=params)
-        
-        if resp.status_code != 200:
-            logger.error("Kalshi GET %s failed (%d): %s", path, resp.status_code, resp.text)
-            resp.raise_for_status()
-            
-        return resp.json()
+        return await self._request("GET", path, params=params, expected_statuses=(200,))
 
     async def _post(self, path: str, body: dict) -> dict:
         """Perform a signed POST request."""
-        headers = self._auth_headers("POST", path)
-        resp = await self._client.post(path, headers=headers, json=body)
-        
-        if resp.status_code not in (200, 201):
-            logger.error("Kalshi POST %s failed (%d): %s", path, resp.status_code, resp.text)
-            resp.raise_for_status()
-            
-        return resp.json()
+        return await self._request("POST", path, body=body, expected_statuses=(200, 201))
 
     async def _delete(self, path: str) -> dict:
-        headers = self._auth_headers("DELETE", path)
-        resp = await self._client.delete(path, headers=headers)
-        resp.raise_for_status()
-        return resp.json()
+        return await self._request("DELETE", path, expected_statuses=(200, 201, 204))
 
     @staticmethod
     def _normalize_ladder(raw_levels: list, cents: bool = False) -> list[tuple[float, int]]:
@@ -362,39 +458,22 @@ class KalshiExchange(ExchangeBase):
             cursor = data.get("cursor")
             if not cursor or not page:
                 break
+            page_delay = max(0.0, Config.KALSHI_MARKETS_PAGE_DELAY_SECONDS)
+            if page_delay > 0:
+                await asyncio.sleep(page_delay)
 
         return all_markets
 
     async def get_market(self, ticker: str) -> Optional[dict]:
         """Fetch a single market by ticker to check its status."""
         path = f"/trade-api/v2/markets/{ticker}"
-        last_error: Optional[Exception] = None
-
-        for attempt in range(3):
-            try:
-                data = await self._get(path)
-                return data.get("market", data)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code == 404:
-                    return None
-
-                # Retry transient server/rate-limit failures.
-                if e.response.status_code in (429, 500, 502, 503, 504) and attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    last_error = e
-                    continue
-                raise
-            except Exception as e:
-                # Network flaps (DNS/connectivity) should be retried before surfacing.
-                if attempt < 2:
-                    await asyncio.sleep(0.5 * (attempt + 1))
-                    last_error = e
-                    continue
-                raise
-
-        if last_error is not None:
-            raise last_error
-        return None
+        try:
+            data = await self._get(path)
+            return data.get("market", data)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                return None
+            raise
 
     async def get_active_series_ticker(self, series_ticker: str) -> Optional[str]:
         """

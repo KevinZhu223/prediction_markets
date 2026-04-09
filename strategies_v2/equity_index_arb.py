@@ -34,6 +34,7 @@ from dataclasses import dataclass
 
 import httpx
 
+from config import Config
 from models import Signal, Side, ContractSide, Platform
 
 logger = logging.getLogger(__name__)
@@ -133,6 +134,9 @@ class EquityIndexArbStrategy:
         self.idle_poll_seconds = 300        # Poll every 5 min when idle
         self.min_distance_pct = 0.10        # Min distance from strike (0.10%)
         self.min_edge_cents = 5             # Minimum edge to trade
+        self._signal_cooldown_seconds = max(30.0, Config.EQUITY_SIGNAL_COOLDOWN_SECONDS)
+        self._market_refresh_seconds = max(120.0, Config.EQUITY_MARKET_REFRESH_SECONDS)
+        self._max_spread = max(0.0, Config.EQUITY_MAX_SPREAD)
 
         # Market close time (4:00 PM ET = 20:00 UTC during EDT)
         self.market_close_hour_utc = 20     # Adjust for DST
@@ -141,6 +145,8 @@ class EquityIndexArbStrategy:
         # Active markets
         self._active_markets: list[dict] = []
         self._signals: list[Signal] = []
+        self._last_signal_by_market: dict[str, float] = {}
+        self._last_market_refresh_ts = 0.0
 
     async def start(self):
         self._active = True
@@ -177,9 +183,12 @@ class EquityIndexArbStrategy:
         """
         During the sniper window, fetch index prices and evaluate markets.
         """
-        # Discover active markets if not cached
-        if not self._active_markets:
-            await self._discover_markets()
+        now_ts = time.time()
+        if (
+            not self._active_markets
+            or (now_ts - self._last_market_refresh_ts) >= self._market_refresh_seconds
+        ):
+            await self._discover_markets(force_refresh=True)
 
         for index_name, config in INDEX_CONFIG.items():
             # Fetch real-time index level
@@ -201,6 +210,7 @@ class EquityIndexArbStrategy:
                     minutes_to_close=minutes_to_close,
                 )
                 if signal:
+                    self._last_signal_by_market[signal.market_id] = now_ts
                     self._signals.append(signal)
                     logger.info(
                         "INDEX SIGNAL: %s %s (reason: %s)",
@@ -235,6 +245,17 @@ class EquityIndexArbStrategy:
             yes_ask = (market.get("yes_ask", 0) or 0) / 100.0
 
         if yes_ask <= 0 and yes_bid <= 0:
+            return None
+
+        last_signal_ts = self._last_signal_by_market.get(ticker, 0.0)
+        if (time.time() - last_signal_ts) < self._signal_cooldown_seconds:
+            return None
+
+        if yes_bid > 0 and yes_ask > 0 and (yes_ask - yes_bid) > self._max_spread:
+            return None
+
+        volume = float(market.get("volume_fp", 0) or 0)
+        if volume < 100:
             return None
 
         # Parse strike from title
@@ -297,20 +318,36 @@ class EquityIndexArbStrategy:
     def _calculate_size(self, edge: float) -> int:
         return max(1, min(100, int(edge * 2)))
 
-    async def _discover_markets(self):
+    async def _discover_markets(self, force_refresh: bool = False):
         """Find active index close markets on Kalshi."""
         if not self.kalshi:
             return
 
+        now = time.time()
+        if (
+            not force_refresh
+            and self._active_markets
+            and (now - self._last_market_refresh_ts) < self._market_refresh_seconds
+        ):
+            return
+
+        active_markets: dict[str, dict] = {}
+
         for config in INDEX_CONFIG.values():
             try:
                 markets = await self.kalshi.fetch_markets(category=config["kalshi_series"])
-                self._active_markets.extend(
-                    [m for m in markets if (m.get("status") or "").lower() in {"active", "open"}]
-                )
+                for market in markets:
+                    if (market.get("status") or "").lower() not in {"active", "open"}:
+                        continue
+                    ticker = market.get("ticker", "")
+                    if not ticker:
+                        continue
+                    active_markets[ticker] = market
             except Exception as e:
                 logger.error("Index market discovery failed: %s", e)
 
+        self._active_markets = list(active_markets.values())
+        self._last_market_refresh_ts = now
         logger.info("Equity index: found %d active markets", len(self._active_markets))
 
     def _minutes_to_market_close(self, now: datetime) -> float:

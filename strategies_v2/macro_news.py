@@ -191,6 +191,7 @@ class MacroNewsStrategy:
         self.scraper = MacroNewsScraper()
         self._active = False
         self._series_market_cache: dict[str, str] = {}
+        self._market_quote_cache: dict[str, dict[str, float]] = {}
 
         # Upcoming releases (populated by schedule manager)
         self.upcoming_releases: list[EconomicRelease] = []
@@ -325,11 +326,47 @@ class MacroNewsStrategy:
         # Confidence scales with surprise magnitude
         confidence = min(0.95, 0.60 + surprise_pct * 2)
 
+        # Convert macro surprise to a rough fair YES probability.
+        if surprise > 0:
+            fair_yes = min(0.97, 0.62 + surprise_pct * 1.8)
+        else:
+            fair_yes = max(0.03, 0.38 - surprise_pct * 1.2)
+
         market_ticker = (
             release.market_ticker
             or self._series_market_cache.get(release.kalshi_series)
             or release.kalshi_series
         )
+
+        quote = self._market_quote_cache.get(market_ticker, {})
+        yes_bid = float(quote.get("yes_bid", 0.0) or 0.0)
+        yes_ask = float(quote.get("yes_ask", 0.0) or 0.0)
+
+        target_price = 0.0
+        edge = 0.0
+        if contract_side == ContractSide.YES:
+            target_price = yes_ask if yes_ask > 0 else 0.0
+            edge = fair_yes - target_price if target_price > 0 else 0.0
+        else:
+            no_ask = (1.0 - yes_bid) if yes_bid > 0 else 0.0
+            fair_no = 1.0 - fair_yes
+            target_price = no_ask
+            edge = fair_no - target_price if target_price > 0 else 0.0
+
+        if target_price <= 0 or target_price >= 1:
+            logger.info("Macro: missing tradable quote for %s, skipping", market_ticker)
+            return None
+
+        if edge < 0.04:
+            logger.info(
+                "Macro: %s edge too small (%.1f%%) at target %.2f",
+                market_ticker,
+                edge * 100,
+                target_price,
+            )
+            return None
+
+        qty = max(1, int(min(120, surprise_pct * 120 + edge * 120)))
 
         signal = Signal(
             strategy="macro_news",
@@ -337,12 +374,12 @@ class MacroNewsStrategy:
             contract_side=contract_side,
             platform=Platform.KALSHI,
             market_id=market_ticker,
-            target_price=0.95,  # Sweep the book
-            quantity=max(1, int(surprise_pct * 100)),
+            target_price=target_price,
+            quantity=qty,
             confidence=confidence,
             reason=(
                 f"{release.name}: actual={actual:.2f} vs consensus={consensus:.2f} "
-                f"({direction}, surprise={surprise_pct:.1%})"
+                f"({direction}, surprise={surprise_pct:.1%}, edge={edge:.1%})"
             )
         )
 
@@ -370,16 +407,30 @@ class MacroNewsStrategy:
         active = [m for m in markets if (m.get("status") or "").lower() in {"active", "open"}]
 
         # Cache one tradable ticker per series so generated signals target real markets.
-        by_series: dict[str, str] = {}
+        by_series: dict[str, tuple[str, float]] = {}
+        quote_cache: dict[str, dict[str, float]] = {}
         for m in active:
             t = m.get("ticker", "")
             if not t:
                 continue
+
+            yes_bid = float(m.get("yes_bid_dollars", 0.0) or 0.0)
+            yes_ask = float(m.get("yes_ask_dollars", 0.0) or 0.0)
+            quote_cache[t] = {
+                "yes_bid": yes_bid,
+                "yes_ask": yes_ask,
+            }
+
+            volume = float(m.get("volume_fp", 0) or 0)
             for series in ["KXCPIYOY", "KXJOBS", "KXCLAIMS", "KXFEDDECISION"]:
                 if t.startswith(series):
-                    by_series.setdefault(series, t)
+                    prev = by_series.get(series)
+                    if prev is None or volume > prev[1]:
+                        by_series[series] = (t, volume)
                     break
-        self._series_market_cache.update(by_series)
+
+        self._series_market_cache.update({k: v[0] for k, v in by_series.items()})
+        self._market_quote_cache.update(quote_cache)
 
         return active
 

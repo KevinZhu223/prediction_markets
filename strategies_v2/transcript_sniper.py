@@ -53,6 +53,7 @@ class TranscriptChunk:
     is_final: bool   # True if this is a finalized transcript segment
 
 
+from config import Config
 from models import Signal, Side, ContractSide, Platform
 
 
@@ -226,6 +227,16 @@ class TranscriptSniperStrategy:
 
         # Targets
         self.targets: list[MentionTarget] = []
+        self._targets_by_key: dict[str, MentionTarget] = {}
+        self._last_discovery_ts = 0.0
+        self._discovery_cooldown_seconds = max(
+            5.0,
+            float(Config.TRANSCRIPT_DISCOVERY_COOLDOWN_SECONDS),
+        )
+        self._discovery_series_delay_seconds = max(
+            0.0,
+            float(Config.TRANSCRIPT_DISCOVERY_SERIES_DELAY_SECONDS),
+        )
 
         # Stats
         self._signals: list[Signal] = []
@@ -247,13 +258,30 @@ class TranscriptSniperStrategy:
 
     def add_target(self, target: MentionTarget):
         """Register a mention target to monitor."""
-        self.targets.append(target)
         match_key = target.market_ticker or target.kalshi_series
+        existing = self._targets_by_key.get(match_key)
+
+        if existing:
+            merged = sorted(set(existing.keywords + target.keywords))
+            if merged != existing.keywords:
+                existing.keywords = merged
+                if existing.keywords:
+                    self.matcher.add_keywords(match_key, existing.keywords)
+                logger.info(
+                    "Transcript sniper: updated target %s (%d keywords)",
+                    existing.show_name,
+                    len(existing.keywords),
+                )
+            return
+
+        self.targets.append(target)
+        self._targets_by_key[match_key] = target
         if target.keywords:
             self.matcher.add_keywords(match_key, target.keywords)
         logger.info(
             "Transcript sniper: added target %s (%d keywords)",
-            target.show_name, len(target.keywords),
+            target.show_name,
+            len(target.keywords),
         )
 
     async def discover_mention_markets(self) -> list[MentionTarget]:
@@ -264,10 +292,20 @@ class TranscriptSniperStrategy:
         if not self.kalshi:
             return []
 
+        now = time.time()
+        since_last = now - self._last_discovery_ts
+        if self._last_discovery_ts and since_last < self._discovery_cooldown_seconds:
+            logger.info(
+                "Transcript sniper: skipping market discovery (cooldown %.0fs remaining)",
+                self._discovery_cooldown_seconds - since_last,
+            )
+            return []
+
         discovered = []
         mention_series = ["KXSNLMENTION", "KXMTPMENTION", "KXTRUMPSAY", "KXMRBEASTMENTION"]
+        self._last_discovery_ts = now
 
-        for series in mention_series:
+        for idx, series in enumerate(mention_series):
             try:
                 markets = await self.kalshi.fetch_markets(category=series)
                 active = [m for m in markets if m.get("status") == "active"]
@@ -275,8 +313,10 @@ class TranscriptSniperStrategy:
                 for m in active:
                     title = m.get("title", "")
                     ticker = m.get("ticker", "")
+                    if not ticker or ticker in self._targets_by_key:
+                        continue
                     keywords = self._extract_keywords_from_title(title)
-                    if not keywords or not ticker:
+                    if not keywords:
                         continue
 
                     target = MentionTarget(
@@ -291,6 +331,9 @@ class TranscriptSniperStrategy:
 
                 if active:
                     logger.info("Discovered %s: %d active markets", series, len(active))
+
+                if idx < len(mention_series) - 1 and self._discovery_series_delay_seconds > 0:
+                    await asyncio.sleep(self._discovery_series_delay_seconds)
 
             except Exception as e:
                 logger.error("Mention market discovery failed for %s: %s", series, e)

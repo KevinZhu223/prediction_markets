@@ -35,6 +35,22 @@ class Config:
     PAPER_TRADING: bool = os.getenv("PAPER_TRADING", "true").lower() == "true"
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     SESSION_TAKEOVER_EXISTING: bool = os.getenv("SESSION_TAKEOVER_EXISTING", "true").lower() == "true"
+    STARTUP_STAGGER_SECONDS: float = float(os.getenv("STARTUP_STAGGER_SECONDS", "0.6"))
+
+    # ── Data Freshness / Throughput Guards ──────────────────────────────
+    ORDERBOOK_MAX_AGE_SECONDS: float = float(os.getenv("ORDERBOOK_MAX_AGE_SECONDS", "6.0"))
+    SPOT_PRICE_MAX_AGE_SECONDS: float = float(os.getenv("SPOT_PRICE_MAX_AGE_SECONDS", "8.0"))
+    SIGNAL_MAX_AGE_SECONDS: float = float(os.getenv("SIGNAL_MAX_AGE_SECONDS", "20.0"))
+    EXECUTOR_QUEUE_MAX_SIZE: int = int(os.getenv("EXECUTOR_QUEUE_MAX_SIZE", "800"))
+    EXECUTOR_QUEUE_WARN_THRESHOLD: int = int(os.getenv("EXECUTOR_QUEUE_WARN_THRESHOLD", "250"))
+    EXECUTOR_DROP_WHEN_FULL: bool = os.getenv("EXECUTOR_DROP_WHEN_FULL", "true").lower() == "true"
+    PENDING_SIGNAL_TTL_SECONDS: float = float(os.getenv("PENDING_SIGNAL_TTL_SECONDS", "120.0"))
+    SIGNAL_DUPLICATE_COOLDOWN_SECONDS: float = float(
+        os.getenv("SIGNAL_DUPLICATE_COOLDOWN_SECONDS", "45.0")
+    )
+    SIGNAL_DUPLICATE_PRICE_TOLERANCE: float = float(
+        os.getenv("SIGNAL_DUPLICATE_PRICE_TOLERANCE", "0.015")
+    )
 
     # ── Risk Parameters ─────────────────────────────────────────────────
     MAX_POSITION_PCT: float = float(os.getenv("MAX_POSITION_PCT", "0.05"))
@@ -48,6 +64,12 @@ class Config:
     TEST_KELLY_FRACTION: float = float(os.getenv("TEST_KELLY_FRACTION", "0.75"))
     TRADE_JOURNAL_ENABLED: bool = os.getenv("TRADE_JOURNAL_ENABLED", "true").lower() == "true"
     MIN_EDGE_THRESHOLD: float = float(os.getenv("MIN_EDGE_THRESHOLD", "0.02"))
+    KELLY_ONE_LOT_CONFIDENCE_FLOOR: float = float(
+        os.getenv("KELLY_ONE_LOT_CONFIDENCE_FLOOR", "0.70")
+    )
+    KELLY_ONE_LOT_EDGE_FLOOR: float = float(
+        os.getenv("KELLY_ONE_LOT_EDGE_FLOOR", "0.05")
+    )
 
     # ── Latency Arb Specific ────────────────────────────────────────────
     SPOT_PRICE_JUMP_THRESHOLD: float = float(os.getenv("SPOT_PRICE_JUMP_THRESHOLD", "50.0"))
@@ -65,11 +87,49 @@ class Config:
     SCANNER_MAX_CALLS_PER_HOUR: int = int(os.getenv("SCANNER_MAX_CALLS_PER_HOUR", "24"))
     SCANNER_MIN_VOLUME: float = float(os.getenv("SCANNER_MIN_VOLUME", "25"))
 
+    # ── Yield Farmer ───────────────────────────────────────────────────
+    YIELD_MIN_VOLUME: float = float(os.getenv("YIELD_MIN_VOLUME", "500"))
+    YIELD_MAX_SPREAD: float = float(os.getenv("YIELD_MAX_SPREAD", "0.08"))
+    YIELD_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("YIELD_MAX_HOURS_TO_EXPIRY", "36.0"))
+
+    # ── Weather / Equity Strategy Guards ───────────────────────────────
+    WEATHER_OBSERVATION_MAX_AGE_SECONDS: float = float(
+        os.getenv("WEATHER_OBSERVATION_MAX_AGE_SECONDS", "1500.0")
+    )
+    WEATHER_SIGNAL_COOLDOWN_SECONDS: float = float(
+        os.getenv("WEATHER_SIGNAL_COOLDOWN_SECONDS", "900.0")
+    )
+    WEATHER_MAX_SPREAD: float = float(os.getenv("WEATHER_MAX_SPREAD", "0.14"))
+    WEATHER_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("WEATHER_MAX_HOURS_TO_EXPIRY", "6.0"))
+    EQUITY_SIGNAL_COOLDOWN_SECONDS: float = float(
+        os.getenv("EQUITY_SIGNAL_COOLDOWN_SECONDS", "240.0")
+    )
+    EQUITY_MARKET_REFRESH_SECONDS: float = float(
+        os.getenv("EQUITY_MARKET_REFRESH_SECONDS", "900.0")
+    )
+    EQUITY_MAX_SPREAD: float = float(os.getenv("EQUITY_MAX_SPREAD", "0.12"))
+
     # ── Transcript Sniper ───────────────────────────────────────────────
     TRANSCRIPT_ENABLE_WHISPER: bool = os.getenv("TRANSCRIPT_ENABLE_WHISPER", "false").lower() == "true"
 
     # ── LLM Linguistic Sniper ───────────────────────────────────────────
     LINGUISTIC_ENABLED: bool = os.getenv("LINGUISTIC_ENABLED", "false").lower() == "true"
+
+    # ── API Rate Limiting / Backoff ─────────────────────────────────────
+    KALSHI_MAX_CONCURRENT_REQUESTS: int = int(os.getenv("KALSHI_MAX_CONCURRENT_REQUESTS", "8"))
+    KALSHI_HTTP_MAX_RETRIES: int = int(os.getenv("KALSHI_HTTP_MAX_RETRIES", "4"))
+    KALSHI_HTTP_BACKOFF_BASE_SECONDS: float = float(os.getenv("KALSHI_HTTP_BACKOFF_BASE_SECONDS", "0.35"))
+    KALSHI_HTTP_BACKOFF_MAX_SECONDS: float = float(os.getenv("KALSHI_HTTP_BACKOFF_MAX_SECONDS", "4.0"))
+    KALSHI_HTTP_JITTER_SECONDS: float = float(os.getenv("KALSHI_HTTP_JITTER_SECONDS", "0.15"))
+    KALSHI_MARKETS_PAGE_DELAY_SECONDS: float = float(os.getenv("KALSHI_MARKETS_PAGE_DELAY_SECONDS", "0.3"))
+
+    # ── Transcript Discovery Controls ───────────────────────────────────
+    TRANSCRIPT_DISCOVERY_COOLDOWN_SECONDS: float = float(
+        os.getenv("TRANSCRIPT_DISCOVERY_COOLDOWN_SECONDS", "900.0")
+    )
+    TRANSCRIPT_DISCOVERY_SERIES_DELAY_SECONDS: float = float(
+        os.getenv("TRANSCRIPT_DISCOVERY_SERIES_DELAY_SECONDS", "0.75")
+    )
 
     @classmethod
     def validate(cls) -> list[str]:

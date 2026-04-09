@@ -29,6 +29,8 @@ from dataclasses import dataclass
 
 import httpx
 
+from config import Config
+
 logger = logging.getLogger(__name__)
 
 
@@ -215,6 +217,11 @@ class WeatherArbStrategy:
         self.poll_interval_seconds = 120  # Check every 2 minutes
         self.temp_confidence_margin = 2.0  # °F margin for high confidence
         self.min_edge_cents = 5  # Minimum edge to trade (5¢)
+        self._observation_max_age_seconds = max(60.0, Config.WEATHER_OBSERVATION_MAX_AGE_SECONDS)
+        self._signal_cooldown_seconds = max(30.0, Config.WEATHER_SIGNAL_COOLDOWN_SECONDS)
+        self._max_spread = max(0.0, Config.WEATHER_MAX_SPREAD)
+        self._max_hours_to_expiry = max(1.0, Config.WEATHER_MAX_HOURS_TO_EXPIRY)
+        self._last_signal_by_market: dict[str, float] = {}
 
         # Track active markets
         self._active_markets: list[dict] = []
@@ -261,12 +268,27 @@ class WeatherArbStrategy:
         try:
             # Broaden discovery: Fetch all and filter by keywords in title
             all_markets = await self.kalshi.fetch_markets()
-            
-            self._active_markets = [
-                m for m in all_markets
-                if m.get("status") == "active"
-                and ("temperature" in m.get("title", "").lower() or "precip" in m.get("title", "").lower() or "temp" in m.get("title", "").lower())
-            ]
+
+            active_markets: list[dict] = []
+            seen_tickers: set[str] = set()
+            for m in all_markets:
+                if m.get("status") != "active":
+                    continue
+                title_lower = m.get("title", "").lower()
+                if not (
+                    "temperature" in title_lower
+                    or "precip" in title_lower
+                    or "temp" in title_lower
+                ):
+                    continue
+
+                ticker = m.get("ticker", "")
+                if not ticker or ticker in seen_tickers:
+                    continue
+                seen_tickers.add(ticker)
+                active_markets.append(m)
+
+            self._active_markets = active_markets
             
             temp_count = sum(1 for m in self._active_markets if "temp" in m.get("title", "").lower())
             precip_count = len(self._active_markets) - temp_count
@@ -294,6 +316,19 @@ class WeatherArbStrategy:
         if yes_ask <= 0:
             return None
 
+        last_signal_ts = self._last_signal_by_market.get(ticker, 0.0)
+        if (time.time() - last_signal_ts) < self._signal_cooldown_seconds:
+            return None
+
+        if yes_bid > 0 and (yes_ask - yes_bid) > self._max_spread:
+            return None
+
+        hours_to_expiry = self._hours_to_expiry(market)
+        if hours_to_expiry is None or hours_to_expiry <= 0:
+            return None
+        if hours_to_expiry > self._max_hours_to_expiry:
+            return None
+
         # Parse the market to determine the station and strike
         station_id, strike_value, market_type = self._parse_weather_market(title, ticker)
         if not station_id:
@@ -302,6 +337,15 @@ class WeatherArbStrategy:
         # Fetch the latest observation from NOAA
         obs = await self.noaa.get_latest_observation(station_id)
         if not obs:
+            return None
+
+        obs_age_seconds = (datetime.now(timezone.utc) - obs.timestamp).total_seconds()
+        if obs_age_seconds > self._observation_max_age_seconds:
+            logger.debug(
+                "Weather arb: stale NOAA obs for %s (age=%.0fs)",
+                station_id,
+                obs_age_seconds,
+            )
             return None
 
         # Determine observed value
@@ -316,7 +360,7 @@ class WeatherArbStrategy:
             return None
 
         # Calculate edge
-        return self._calculate_signal(
+        signal = self._calculate_signal(
             ticker=ticker,
             market_type=market_type,
             observed=observed,
@@ -325,6 +369,10 @@ class WeatherArbStrategy:
             yes_ask=yes_ask,
             station_id=station_id,
         )
+
+        if signal:
+            self._last_signal_by_market[ticker] = time.time()
+        return signal
 
     def _calculate_signal(
         self,
@@ -456,3 +504,14 @@ class WeatherArbStrategy:
             "signals_generated": len(self._signals_generated),
             "stations_monitored": list(STATION_MAP.values()),
         }
+
+    @staticmethod
+    def _hours_to_expiry(market: dict) -> Optional[float]:
+        exp_str = market.get("expiration_time", "")
+        if not exp_str:
+            return None
+        try:
+            exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+            return (exp_dt.timestamp() - time.time()) / 3600.0
+        except Exception:
+            return None

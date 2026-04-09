@@ -17,3 +17,7 @@ openai>=1.30
 
 # Logging
 rich>=13.7
+
+# Testing
+pytest>=8.3
+pytest-asyncio>=0.24

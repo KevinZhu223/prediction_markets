@@ -29,6 +29,9 @@ class YieldFarmerStrategy:
         self.min_yield_threshold = 0.95  # Target markets priced >= 95c
         self.max_yield_threshold = 0.98  # Ignore if it's already 99c
         self.poll_interval = 300         # Check every 5 minutes to avoid rate limits
+        self._min_volume = max(0.0, Config.YIELD_MIN_VOLUME)
+        self._max_spread = max(0.0, Config.YIELD_MAX_SPREAD)
+        self._max_hours_to_expiry = max(1.0, Config.YIELD_MAX_HOURS_TO_EXPIRY)
         
         self._active_markets = 0
         self._signals_generated: list[Signal] = []
@@ -36,7 +39,11 @@ class YieldFarmerStrategy:
 
     async def start(self):
         self._active = True
-        logger.info("Yield farmer: started (target yield range 95c - 98c)")
+        logger.info(
+            "Yield farmer: started (target range 95c-98c, max_expiry=%.1fh, min_volume=%.0f)",
+            self._max_hours_to_expiry,
+            self._min_volume,
+        )
 
     async def stop(self):
         self._active = False
@@ -63,16 +70,27 @@ class YieldFarmerStrategy:
             # Skip if we already farmed this market
             if ticker in self._yields_captured:
                 continue
+
+            hours_to_expiry = self._hours_to_expiry(m)
+            if hours_to_expiry is None or hours_to_expiry <= 0:
+                continue
+            if hours_to_expiry > self._max_hours_to_expiry:
+                continue
                 
             yes_ask_d = m.get("yes_ask_dollars")
             yes_bid_d = m.get("yes_bid_dollars")
             yes_ask = float(yes_ask_d) if yes_ask_d else None
             yes_bid = float(yes_bid_d) if yes_bid_d else None
+
+            if yes_ask is not None and yes_bid is not None:
+                spread = yes_ask - yes_bid
+                if spread > self._max_spread:
+                    continue
             
             volume = float(m.get("volume_fp", 0) or 0)
             
             # Require at least some volume to avoid dead markets with stale quotes
-            if volume < 500:
+            if volume < self._min_volume:
                 continue
 
             signal = None
@@ -96,6 +114,8 @@ class YieldFarmerStrategy:
             elif yes_bid is not None and (1.00 - self.max_yield_threshold) <= yes_bid <= (1.00 - self.min_yield_threshold):
                 # We buy the NO contract. price = 1.0 - yes_bid
                 no_ask = 1.00 - yes_bid
+                if no_ask <= 0 or no_ask >= 1:
+                    continue
                 signal = Signal(
                     strategy="yield_farmer",
                     action=Side.BUY,
@@ -116,6 +136,18 @@ class YieldFarmerStrategy:
                     signal.contract_side.value, signal.market_id, signal.target_price, (1.00 - signal.target_price)*100
                 )
                 await signal_callback(signal)
+
+    def _hours_to_expiry(self, market: dict) -> Optional[float]:
+        exp_str = market.get("expiration_time", "")
+        if not exp_str:
+            return None
+        try:
+            import datetime
+
+            exp_dt = datetime.datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+            return (exp_dt.timestamp() - time.time()) / 3600.0
+        except Exception:
+            return None
 
     def _calculate_size(self) -> int:
         # Go heavy on "guaranteed" bets. Risk manager limits to max allocation.

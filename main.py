@@ -83,6 +83,7 @@ def render_dashboard(
     table.add_row("P&L", f"${risk_stats['pnl']:.2f} ({risk_stats['pnl_pct']:+.2f}%)")
     table.add_row("Drawdown", f"{risk_stats['drawdown_pct']:.2f}%")
     table.add_row("Positions", str(risk_stats['positions']))
+    table.add_row("Pending Signals", str(risk_stats.get('pending_signals', 0)))
     table.add_row("Total Fees", f"${risk_stats['total_fees']:.4f}")
     table.add_row("Settlements Collected", f"${risk_stats.get('settlements_collected', 0.0):.2f}")
     table.add_row("Open Cost Basis", f"${risk_stats.get('open_notional_cost_basis', 0.0):.2f}")
@@ -93,8 +94,26 @@ def render_dashboard(
     table.add_row("--- Execution ---", "")
     table.add_row("Signals Received", str(exec_stats['signals_received']))
     table.add_row("Signals Approved", str(exec_stats['signals_approved']))
+    table.add_row("Signals Rejected", str(exec_stats['signals_rejected']))
+    table.add_row("Dropped (Overload)", str(exec_stats.get('signals_dropped_overload', 0)))
+    table.add_row("Dropped (Stale)", str(exec_stats.get('signals_dropped_stale', 0)))
+    table.add_row("Dropped (Duplicate)", str(exec_stats.get('signals_dropped_duplicate', 0)))
     table.add_row("Fills Completed", str(exec_stats['fills_completed']))
     table.add_row("Fill Rate", f"{exec_stats['fill_rate']:.1f}%")
+    table.add_row(
+        "Executor Queue",
+        f"{exec_stats.get('queue_size', 0)}/{exec_stats.get('queue_max_size', 0)}",
+    )
+    strategy_stats = exec_stats.get("strategy_stats", {})
+    if strategy_stats:
+        top_name, top_data = max(
+            strategy_stats.items(),
+            key=lambda kv: kv[1].get("fills_completed", 0),
+        )
+        table.add_row(
+            "Top Strategy (fills)",
+            f"{top_name}: {top_data.get('fills_completed', 0)}",
+        )
 
     # AI Scanner
     table.add_row("--- AI Market Scanner ---", "")
@@ -235,14 +254,24 @@ async def main():
     latency_arb._on_spot_update = latency_signal_router
 
     # -- Start everything --
+    startup_stagger = max(0.0, Config.STARTUP_STAGGER_SECONDS)
+
     await executor.start()
+    if startup_stagger > 0:
+        await asyncio.sleep(startup_stagger)
     
     # We explicitly disable HFT latency strategies due to adverse selection
     # await latency_arb.start()
     # await linguistic_sniper.start()
 
     await ai_scanner.start()
+    if startup_stagger > 0:
+        await asyncio.sleep(startup_stagger)
+
     await yield_farmer.start()
+    if startup_stagger > 0:
+        await asyncio.sleep(startup_stagger)
+
     await transcript.start()
 
     # Discover mention markets for transcript sniper

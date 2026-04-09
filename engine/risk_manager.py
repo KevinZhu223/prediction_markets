@@ -77,6 +77,9 @@ class RiskManager:
 
         # Pending signals currently in flight to the executor
         self._pending_signals: dict[tuple[str, ContractSide], int] = {}
+        self._pending_updated_at: dict[tuple[str, ContractSide], float] = {}
+        self._pending_signal_ttl_seconds = max(5.0, Config.PENDING_SIGNAL_TTL_SECONDS)
+        self._pending_cleanup_last = 0.0
 
         # Runtime telemetry files for VM monitoring.
         self._journal_enabled = Config.TRADE_JOURNAL_ENABLED
@@ -215,11 +218,37 @@ class RiskManager:
 
     # ── Signal validation ───────────────────────────────────────────────
 
+    def _cleanup_stale_pending(self, force: bool = False):
+        """Drop pending reservations that were never reconciled by fill/failure events."""
+        now = time.time()
+        if not force and (now - self._pending_cleanup_last) < 0.5:
+            return
+        self._pending_cleanup_last = now
+
+        stale_keys: list[tuple[str, ContractSide]] = []
+        for key, ts in list(self._pending_updated_at.items()):
+            if (now - ts) > self._pending_signal_ttl_seconds:
+                stale_keys.append(key)
+
+        for key in stale_keys:
+            qty = self._pending_signals.pop(key, 0)
+            self._pending_updated_at.pop(key, None)
+            if qty > 0:
+                logger.warning(
+                    "Risk: cleared stale pending allocation for %s %s (qty=%d, age>%.1fs)",
+                    key[0],
+                    key[1].value,
+                    qty,
+                    self._pending_signal_ttl_seconds,
+                )
+
     def validate_signal(self, signal: Signal) -> tuple[bool, str, int]:
         """
         Validate whether a signal should be executed.
         Returns: (approved, reason, adjusted_quantity)
         """
+        self._cleanup_stale_pending()
+
         # Circuit breaker: max drawdown
         if self._max_drawdown_hit:
             return False, "Circuit breaker active: max drawdown exceeded", 0
@@ -252,6 +281,21 @@ class RiskManager:
 
         # Kelly Criterion sizing
         kelly_qty = self._kelly_size(signal)
+        if kelly_qty <= 0:
+            inferred_edge = self._infer_signal_edge(signal)
+            if (
+                signal.confidence >= Config.KELLY_ONE_LOT_CONFIDENCE_FLOOR
+                and inferred_edge >= Config.KELLY_ONE_LOT_EDGE_FLOOR
+                and 0.0 < signal.target_price < 0.98
+            ):
+                kelly_qty = 1
+                logger.info(
+                    "Risk: Kelly fallback allowing 1-lot probe on %s (edge=%.3f, conf=%.2f)",
+                    signal.market_id,
+                    inferred_edge,
+                    signal.confidence,
+                )
+
         if kelly_qty < adjusted_qty:
             adjusted_qty = kelly_qty
             logger.info(
@@ -289,6 +333,7 @@ class RiskManager:
 
         # Mark as pending so we don't over-trade in the next millisecond
         self._pending_signals[pos_key] = pending_qty + adjusted_qty
+        self._pending_updated_at[pos_key] = time.time()
         
         return True, "Approved", adjusted_qty
 
@@ -332,6 +377,26 @@ class RiskManager:
             
         return max(0, contracts)
 
+    def _infer_signal_edge(self, signal: Signal) -> float:
+        """Estimate edge from signal metadata when explicit model outputs are available."""
+        if signal.action != Side.BUY:
+            return 0.0
+
+        try:
+            import re
+
+            fair_match = re.search(r'fair=([\d.]+)%', signal.reason)
+            if fair_match:
+                fair_yes = float(fair_match.group(1)) / 100.0
+                contract_fair = fair_yes
+                if signal.contract_side == ContractSide.NO:
+                    contract_fair = 1.0 - fair_yes
+                return max(0.0, contract_fair - signal.target_price)
+        except Exception:
+            pass
+
+        return max(0.0, signal.confidence - signal.target_price)
+
     # ── Drawdown tracking ───────────────────────────────────────────────
 
     def _current_drawdown(self) -> float:
@@ -358,6 +423,9 @@ class RiskManager:
             self._pending_signals[pos_key] = max(0, self._pending_signals[pos_key] - fill.fill_quantity)
             if self._pending_signals[pos_key] <= 0:
                 del self._pending_signals[pos_key]
+                self._pending_updated_at.pop(pos_key, None)
+            else:
+                self._pending_updated_at[pos_key] = time.time()
 
         if fill.order.side == Side.BUY:
             if pos_key in self._positions:
@@ -475,6 +543,9 @@ class RiskManager:
                 self._pending_signals[key] = max(0, self._pending_signals[key] - quantity)
                 if self._pending_signals[key] <= 0:
                     del self._pending_signals[key]
+                    self._pending_updated_at.pop(key, None)
+                else:
+                    self._pending_updated_at[key] = time.time()
             self._write_journal_event(
                 "order_failure",
                 {
@@ -491,6 +562,9 @@ class RiskManager:
             self._pending_signals[key] = max(0, self._pending_signals[key] - quantity)
             if self._pending_signals[key] <= 0:
                 del self._pending_signals[key]
+                self._pending_updated_at.pop(key, None)
+            else:
+                self._pending_updated_at[key] = time.time()
 
         self._write_journal_event(
             "order_failure",
@@ -540,7 +614,16 @@ class RiskManager:
     def reset_circuit_breaker(self):
         """Manual reset after reviewing the drawdown situation."""
         self._max_drawdown_hit = False
+        self._pending_signals.clear()
+        self._pending_updated_at.clear()
+        self._pending_cleanup_last = time.time()
         logger.info("Circuit breaker manually reset")
+        self._write_journal_event(
+            "circuit_breaker_reset",
+            {
+                "pending_cleared": True,
+            },
+        )
 
     # ── Stats ───────────────────────────────────────────────────────────
 
@@ -576,6 +659,7 @@ class RiskManager:
             "max_position_pct": self.max_position_pct,
             "max_drawdown_limit_pct": self.max_drawdown_pct * 100,
             "kelly_fraction": self.kelly_fraction,
+            "pending_signals": sum(self._pending_signals.values()),
             "session_uptime_seconds": int(max(0.0, time.time() - self._session_started_at)),
             "state_file": str(self._state_path),
             "journal_file": str(self._journal_path) if self._journal_path else None,
