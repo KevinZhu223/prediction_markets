@@ -267,7 +267,7 @@ class TranscriptSniperStrategy:
                 existing.keywords = merged
                 if existing.keywords:
                     self.matcher.add_keywords(match_key, existing.keywords)
-                logger.info(
+                logger.debug(
                     "Transcript sniper: updated target %s (%d keywords)",
                     existing.show_name,
                     len(existing.keywords),
@@ -278,7 +278,7 @@ class TranscriptSniperStrategy:
         self._targets_by_key[match_key] = target
         if target.keywords:
             self.matcher.add_keywords(match_key, target.keywords)
-        logger.info(
+        logger.debug(
             "Transcript sniper: added target %s (%d keywords)",
             target.show_name,
             len(target.keywords),

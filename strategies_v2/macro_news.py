@@ -212,6 +212,10 @@ class MacroNewsStrategy:
             await self.discover_markets()
         except Exception as e:
             logger.warning("Macro discovery warmup failed: %s", e)
+        if not self.upcoming_releases:
+            logger.warning(
+                "Macro news sniper: no releases scheduled; call add_release(...) to activate trading."
+            )
         logger.info("Macro news sniper: started")
 
     async def stop(self):
@@ -258,6 +262,14 @@ class MacroNewsStrategy:
         Polls the source URL every 500ms until the data appears.
         """
         logger.info("Entering sniper mode for %s", release.name)
+
+        # Keep quotes fresh around release time so generated signals target
+        # currently tradable tickers and live prices.
+        try:
+            await self.discover_markets()
+        except Exception as e:
+            logger.debug("Macro quote refresh failed before release %s: %s", release.name, e)
+
         max_attempts = 600  # 5 minutes of polling at 500ms = 600 attempts
 
         for attempt in range(max_attempts):

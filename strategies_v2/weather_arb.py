@@ -81,6 +81,16 @@ class NOAAClient:
                 "Accept": "application/geo+json",
             },
         )
+        self._last_error_log_ts: dict[str, float] = {}
+
+    def _log_error_throttled(self, key: str, message: str, interval_seconds: float = 60.0):
+        now = time.time()
+        last = self._last_error_log_ts.get(key, 0.0)
+        if (now - last) >= interval_seconds:
+            logger.error(message)
+            self._last_error_log_ts[key] = now
+        else:
+            logger.debug(message)
 
     async def get_latest_observation(self, station_id: str) -> Optional[WeatherObservation]:
         """
@@ -131,10 +141,16 @@ class NOAAClient:
             )
 
         except httpx.HTTPStatusError as e:
-            logger.error("NOAA API error for %s: %s", station_id, e)
+            self._log_error_throttled(
+                f"http:{station_id}",
+                f"NOAA API error for {station_id}: {e}",
+            )
             return None
         except Exception as e:
-            logger.error("NOAA fetch failed for %s: %s", station_id, e)
+            self._log_error_throttled(
+                f"fetch:{station_id}",
+                f"NOAA fetch failed for {station_id}: {e}",
+            )
             return None
 
     async def get_recent_observations(
@@ -218,10 +234,20 @@ class WeatherArbStrategy:
         self.temp_confidence_margin = 2.0  # °F margin for high confidence
         self.min_edge_cents = 5  # Minimum edge to trade (5¢)
         self._observation_max_age_seconds = max(60.0, Config.WEATHER_OBSERVATION_MAX_AGE_SECONDS)
+        self._obs_cache_ttl_seconds = max(5.0, Config.WEATHER_OBS_CACHE_TTL_SECONDS)
+        self._max_markets_per_scan = max(10, Config.WEATHER_MAX_MARKETS_PER_SCAN)
+        self._discovery_log_cooldown_seconds = max(
+            10.0,
+            Config.WEATHER_DISCOVERY_LOG_COOLDOWN_SECONDS,
+        )
         self._signal_cooldown_seconds = max(30.0, Config.WEATHER_SIGNAL_COOLDOWN_SECONDS)
         self._max_spread = max(0.0, Config.WEATHER_MAX_SPREAD)
         self._max_hours_to_expiry = max(1.0, Config.WEATHER_MAX_HOURS_TO_EXPIRY)
         self._last_signal_by_market: dict[str, float] = {}
+        self._station_obs_cache: dict[str, WeatherObservation] = {}
+        self._station_obs_fetched_at: dict[str, float] = {}
+        self._last_discovery_count = -1
+        self._last_discovery_log_ts = 0.0
 
         # Track active markets
         self._active_markets: list[dict] = []
@@ -285,18 +311,47 @@ class WeatherArbStrategy:
                 ticker = m.get("ticker", "")
                 if not ticker or ticker in seen_tickers:
                     continue
+
+                hours_to_expiry = self._hours_to_expiry(m)
+                if hours_to_expiry is None or hours_to_expiry <= 0:
+                    continue
+                if hours_to_expiry > self._max_hours_to_expiry:
+                    continue
+
+                volume = float(m.get("volume_fp", 0) or 0)
+                if volume < 20:
+                    continue
+
                 seen_tickers.add(ticker)
                 active_markets.append(m)
 
-            self._active_markets = active_markets
+            active_markets.sort(
+                key=lambda x: (
+                    self._hours_to_expiry(x) or 9999.0,
+                    -float(x.get("volume_fp", 0) or 0),
+                )
+            )
+
+            self._active_markets = active_markets[: self._max_markets_per_scan]
             
             temp_count = sum(1 for m in self._active_markets if "temp" in m.get("title", "").lower())
             precip_count = len(self._active_markets) - temp_count
 
-            logger.info(
-                "Weather arb: found %d active weather markets (temp=%d, precip=%d)",
-                len(self._active_markets), temp_count, precip_count,
+            now = time.time()
+            should_log = (
+                len(self._active_markets) != self._last_discovery_count
+                or (now - self._last_discovery_log_ts) >= self._discovery_log_cooldown_seconds
             )
+            if should_log:
+                logger.info(
+                    "Weather arb: tracking %d markets (temp=%d, precip=%d, cap=%d)",
+                    len(self._active_markets),
+                    temp_count,
+                    precip_count,
+                    self._max_markets_per_scan,
+                )
+                self._last_discovery_count = len(self._active_markets)
+                self._last_discovery_log_ts = now
 
         except Exception as e:
             logger.error("Weather market discovery failed: %s", e)
@@ -333,9 +388,12 @@ class WeatherArbStrategy:
         station_id, strike_value, market_type = self._parse_weather_market(title, ticker)
         if not station_id:
             return None
+        if market_type == "temperature" and strike_value <= 0:
+            logger.debug("Weather arb: unable to parse strike for %s (%s)", ticker, title)
+            return None
 
         # Fetch the latest observation from NOAA
-        obs = await self.noaa.get_latest_observation(station_id)
+        obs = await self._get_station_observation(station_id)
         if not obs:
             return None
 
@@ -373,6 +431,26 @@ class WeatherArbStrategy:
         if signal:
             self._last_signal_by_market[ticker] = time.time()
         return signal
+
+    async def _get_station_observation(self, station_id: str) -> Optional[WeatherObservation]:
+        now = time.time()
+        cached = self._station_obs_cache.get(station_id)
+        fetched_at = self._station_obs_fetched_at.get(station_id, 0.0)
+
+        if cached and (now - fetched_at) <= self._obs_cache_ttl_seconds:
+            return cached
+
+        fresh = await self.noaa.get_latest_observation(station_id)
+        if fresh is not None:
+            self._station_obs_cache[station_id] = fresh
+            self._station_obs_fetched_at[station_id] = now
+            return fresh
+
+        # Use recent cached obs if upstream is flaky.
+        if cached and (now - fetched_at) <= (self._obs_cache_ttl_seconds * 3):
+            return cached
+
+        return None
 
     def _calculate_signal(
         self,

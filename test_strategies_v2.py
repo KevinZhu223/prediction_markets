@@ -139,6 +139,11 @@ async def test_macro_news():
 
     # Test 2b: Signal generation logic (synthetic)
     strategy = MacroNewsStrategy()
+    strategy._series_market_cache["KXCPIYOY"] = "KXCPIYOY-TEST"
+    strategy._market_quote_cache["KXCPIYOY-TEST"] = {
+        "yes_bid": 0.60,
+        "yes_ask": 0.62,
+    }
     release = EconomicRelease(
         name="CPI YoY",
         kalshi_series="KXCPIYOY",
@@ -229,6 +234,7 @@ async def test_equity_index():
             "title": "S&P 500 above 5,200 on Friday?",
             "yes_bid": 60,
             "yes_ask": 65,
+            "volume_fp": 250,
         },
         minutes_to_close=5.0,
     )
@@ -247,6 +253,7 @@ async def test_equity_index():
             "title": "S&P 500 above 5,200 on Friday?",
             "yes_bid": 40,
             "yes_ask": 45,
+            "volume_fp": 250,
         },
         minutes_to_close=3.0,
     )

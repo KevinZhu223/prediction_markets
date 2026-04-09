@@ -17,6 +17,7 @@ from rich.table import Table
 from rich.live import Live
 from rich.panel import Panel
 from rich.console import Group
+from rich.layout import Layout
 
 from config import Config
 from models import Platform
@@ -54,6 +55,10 @@ def setup_logging():
         ],
     )
 
+    # Keep Live dashboard readable by suppressing per-request HTTP client INFO spam.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,7 +93,6 @@ def render_dashboard(
     table.add_row("P&L", f"${risk_stats['pnl']:.2f} ({risk_stats['pnl_pct']:+.2f}%)")
     table.add_row("Drawdown", f"{risk_stats['drawdown_pct']:.2f}%")
     table.add_row("Positions", str(risk_stats['positions']))
-    table.add_row("Pending Signals", str(risk_stats.get('pending_signals', 0)))
     table.add_row("Total Fees", f"${risk_stats['total_fees']:.4f}")
     table.add_row("Settlements Collected", f"${risk_stats.get('settlements_collected', 0.0):.2f}")
     table.add_row("Open Cost Basis", f"${risk_stats.get('open_notional_cost_basis', 0.0):.2f}")
@@ -99,26 +103,8 @@ def render_dashboard(
     table.add_row("--- Execution ---", "")
     table.add_row("Signals Received", str(exec_stats['signals_received']))
     table.add_row("Signals Approved", str(exec_stats['signals_approved']))
-    table.add_row("Signals Rejected", str(exec_stats['signals_rejected']))
-    table.add_row("Dropped (Overload)", str(exec_stats.get('signals_dropped_overload', 0)))
-    table.add_row("Dropped (Stale)", str(exec_stats.get('signals_dropped_stale', 0)))
-    table.add_row("Dropped (Duplicate)", str(exec_stats.get('signals_dropped_duplicate', 0)))
     table.add_row("Fills Completed", str(exec_stats['fills_completed']))
     table.add_row("Fill Rate", f"{exec_stats['fill_rate']:.1f}%")
-    table.add_row(
-        "Executor Queue",
-        f"{exec_stats.get('queue_size', 0)}/{exec_stats.get('queue_max_size', 0)}",
-    )
-    strategy_stats = exec_stats.get("strategy_stats", {})
-    if strategy_stats:
-        top_name, top_data = max(
-            strategy_stats.items(),
-            key=lambda kv: kv[1].get("fills_completed", 0),
-        )
-        table.add_row(
-            "Top Strategy (fills)",
-            f"{top_name}: {top_data.get('fills_completed', 0)}",
-        )
 
     # AI Scanner
     table.add_row("--- AI Market Scanner ---", "")
@@ -163,7 +149,7 @@ def render_dashboard(
     pos_table.add_column("Contract", style="yellow")
     pos_table.add_column("Size", style="green", justify="right")
     pos_table.add_column("Avg Price", style="magenta", justify="right")
-    
+
     positions = risk_stats.get("active_positions", [])
     if not positions:
         pos_table.add_row("No active positions", "-", "-", "-")
@@ -176,7 +162,12 @@ def render_dashboard(
                 f"${p['avg_price']:.2f}"
             )
 
-    return Group(table, pos_table)
+    layout = Layout()
+    layout.split_column(
+        Layout(table, name="metrics"),
+        Layout(pos_table, name="positions", size=9),
+    )
+    return layout
 
 
 # -- Main --------------------------------------------------------------------
@@ -269,40 +260,19 @@ async def main():
 
     latency_arb._on_spot_update = latency_signal_router
 
-    startup_stagger = max(0.0, Config.STARTUP_STAGGER_SECONDS)
-
     await executor.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
     
     # Enable all purely latency-based strategies
     await latency_arb.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
-
     if Config.LINGUISTIC_ENABLED:
         await linguistic_sniper.start()
-        if startup_stagger > 0:
-            await asyncio.sleep(startup_stagger)
     else:
         logger.info("Linguistic sniper: disabled (LINGUISTIC_ENABLED=false)")
     
     await ai_scanner.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
-
     await weather.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
-
     await macro.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
-
     await equity.start()
-    if startup_stagger > 0:
-        await asyncio.sleep(startup_stagger)
-
     await transcript.start()
 
     # Discover mention markets for transcript sniper
@@ -418,6 +388,7 @@ async def main():
     tasks.append(asyncio.create_task(portfolio_monitor_loop()))
 
     try:
+        console.clear()
         with Live(
             render_dashboard(risk_manager, executor, ai_scanner, crypto_feed,
                            weather, macro, equity, transcript),

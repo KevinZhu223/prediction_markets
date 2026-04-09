@@ -29,6 +29,7 @@ import logging
 import time
 import re
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from typing import Optional
 from dataclasses import dataclass
 
@@ -137,9 +138,10 @@ class EquityIndexArbStrategy:
         self._signal_cooldown_seconds = max(30.0, Config.EQUITY_SIGNAL_COOLDOWN_SECONDS)
         self._market_refresh_seconds = max(120.0, Config.EQUITY_MARKET_REFRESH_SECONDS)
         self._max_spread = max(0.0, Config.EQUITY_MAX_SPREAD)
+        self._market_tz = ZoneInfo("America/New_York")
 
-        # Market close time (4:00 PM ET = 20:00 UTC during EDT)
-        self.market_close_hour_utc = 20     # Adjust for DST
+        # Market close time (4:00 PM ET, DST-aware via timezone conversion)
+        self.market_close_hour_et = 16
         self.market_close_minute = 0
 
         # Active markets
@@ -352,13 +354,14 @@ class EquityIndexArbStrategy:
 
     def _minutes_to_market_close(self, now: datetime) -> float:
         """Calculate minutes remaining until 4:00 PM ET market close."""
-        close_today = now.replace(
-            hour=self.market_close_hour_utc,
+        now_et = now.astimezone(self._market_tz)
+        close_today_et = now_et.replace(
+            hour=self.market_close_hour_et,
             minute=self.market_close_minute,
             second=0,
             microsecond=0,
         )
-        delta = (close_today - now).total_seconds() / 60.0
+        delta = (close_today_et - now_et).total_seconds() / 60.0
         return delta
 
     @staticmethod

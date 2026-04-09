@@ -36,7 +36,7 @@ def report_skip(name, reason):
 
 # -- Test 1: Config ----------------------------------------------------------
 
-def test_config():
+def _run_config_checks():
     print("\n=== Test 1: Configuration ===")
     warnings = Config.validate()
     report("Config loads without crash", True)
@@ -51,6 +51,10 @@ def test_config():
            f"kelly={Config.KELLY_FRACTION}, max_dd={Config.MAX_DRAWDOWN_PCT}")
 
     return has_kalshi, has_openai
+
+
+def test_config():
+    _run_config_checks()
 
 
 # -- Test 2: Risk Manager ---------------------------------------------------
@@ -263,7 +267,7 @@ async def run_all():
     print("  Prediction Market Bot -- Test Suite (V2)")
     print("=" * 60)
 
-    has_kalshi, has_openai = test_config()
+    has_kalshi, has_openai = _run_config_checks()
     test_risk_manager()
     await test_kalshi(has_kalshi)
     await test_crypto_feed()

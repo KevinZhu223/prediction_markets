@@ -96,6 +96,15 @@ class Config:
     WEATHER_OBSERVATION_MAX_AGE_SECONDS: float = float(
         os.getenv("WEATHER_OBSERVATION_MAX_AGE_SECONDS", "1500.0")
     )
+    WEATHER_OBS_CACHE_TTL_SECONDS: float = float(
+        os.getenv("WEATHER_OBS_CACHE_TTL_SECONDS", "45.0")
+    )
+    WEATHER_MAX_MARKETS_PER_SCAN: int = int(
+        os.getenv("WEATHER_MAX_MARKETS_PER_SCAN", "60")
+    )
+    WEATHER_DISCOVERY_LOG_COOLDOWN_SECONDS: float = float(
+        os.getenv("WEATHER_DISCOVERY_LOG_COOLDOWN_SECONDS", "300.0")
+    )
     WEATHER_SIGNAL_COOLDOWN_SECONDS: float = float(
         os.getenv("WEATHER_SIGNAL_COOLDOWN_SECONDS", "900.0")
     )
