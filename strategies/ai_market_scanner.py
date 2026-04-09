@@ -326,6 +326,13 @@ Return compact JSON only. Keep reasoning <= 25 words."""
                     )
 
                 if signal:
+                    # SAFETY CAP: Never buy AI contracts at > $0.85 (implied 85% probability).
+                    # These carry asymmetrical risk-reward where 1 loss wipes out 10+ wins.
+                    if signal.target_price > 0.85:
+                        logger.info("AI SCANNER: Skipping signal %s @ %.4f (Price %d¢ exceeds 85¢ safety cap)", 
+                                    signal.market_id, signal.target_price, int(signal.target_price*100))
+                        return None
+
                     logger.info(
                         "AI SCANNER SIGNAL: %s %s @ %.4f (edge=%.1f%%, conf=%.2f)",
                         signal.action.value, signal.market_id,
