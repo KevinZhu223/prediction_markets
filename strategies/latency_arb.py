@@ -29,6 +29,8 @@ class LatencyArbStrategy:
         self.aggregator = aggregator
         self.jump_threshold = Config.SPOT_PRICE_JUMP_THRESHOLD
         self.min_edge = Config.MIN_EDGE_THRESHOLD
+        self._min_entry_price = max(0.0, Config.LATENCY_MIN_ENTRY_PRICE)
+        self._max_entry_price = min(1.0, Config.LATENCY_MAX_ENTRY_PRICE)
         self._active = False
 
         # Cooldown tracking to avoid re-entering the same move
@@ -125,6 +127,16 @@ class LatencyArbStrategy:
 
         ob = self.aggregator.get_order_book(ticker)
         if ob and ob.best_ask is not None:
+            if not (self._min_entry_price <= ob.best_ask <= self._max_entry_price):
+                logger.debug(
+                    "Latency arb: skip %s YES ask %.4f outside [%.2f, %.2f]",
+                    ticker,
+                    ob.best_ask,
+                    self._min_entry_price,
+                    self._max_entry_price,
+                )
+                return signals
+
             # Estimate edge for BUYing YES
             edge = self._estimate_edge(ob.best_ask, direction="up", delta=delta)
             if edge >= self.min_edge:
@@ -154,6 +166,16 @@ class LatencyArbStrategy:
             # Buying NO at (1 - YES_bid)
             # If YES Bid is 0.40, price to buy NO is 0.60
             no_ask = 1.0 - ob.best_bid
+            if not (self._min_entry_price <= no_ask <= self._max_entry_price):
+                logger.debug(
+                    "Latency arb: skip %s NO ask %.4f outside [%.2f, %.2f]",
+                    ticker,
+                    no_ask,
+                    self._min_entry_price,
+                    self._max_entry_price,
+                )
+                return signals
+
             edge = self._estimate_edge(no_ask, direction="down", delta=delta)
             
             if edge >= self.min_edge:

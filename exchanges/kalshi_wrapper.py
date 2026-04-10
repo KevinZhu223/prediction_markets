@@ -289,6 +289,28 @@ class KalshiExchange(ExchangeBase):
                 resp.raise_for_status()
             return resp.json()
 
+    async def _fetch_market_snapshot_for_paper(self, market_id: str) -> dict:
+        """Fetch market metadata for paper fill validation."""
+        path = f"/trade-api/v2/markets/{market_id}"
+
+        if self._client and self._private_key and self._api_key:
+            try:
+                return await self._get(path)
+            except Exception as e:
+                logger.debug("Paper simulation: signed market fetch failed for %s: %s", market_id, e)
+
+        if self._client:
+            resp = await self._client.get(path)
+            if resp.status_code != 200:
+                resp.raise_for_status()
+            return resp.json()
+
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=10.0) as client:
+            resp = await client.get(path)
+            if resp.status_code != 200:
+                resp.raise_for_status()
+            return resp.json()
+
     @staticmethod
     def _vwap_for_quantity(levels: list[tuple[float, int]], quantity: int) -> Optional[float]:
         """Compute VWAP for the requested quantity using price-priority levels."""
@@ -312,6 +334,25 @@ class KalshiExchange(ExchangeBase):
 
     async def _simulate_paper_fill(self, order: Order) -> Optional[Fill]:
         """Simulate realistic FOK fills in paper mode using visible orderbook depth."""
+        try:
+            market_data = await self._fetch_market_snapshot_for_paper(order.market_id)
+            market = market_data.get("market", market_data)
+            status = str((market or {}).get("status", "")).lower()
+            if status and status not in {"active", "open"}:
+                logger.info(
+                    "[PAPER] Kalshi skip: %s status=%s (not tradable)",
+                    order.market_id,
+                    status,
+                )
+                return None
+        except Exception as e:
+            logger.error(
+                "Paper simulation: failed to verify market %s: %s",
+                order.market_id,
+                e,
+            )
+            return None
+
         try:
             data = await self._fetch_orderbook_snapshot_for_paper(order.market_id)
         except Exception as e:
@@ -341,11 +382,32 @@ class KalshiExchange(ExchangeBase):
 
         available_qty = sum(q for _, q in eligible)
         if available_qty < order.quantity:
+            logger.debug(
+                "[PAPER] Kalshi depth miss: %s %s %s @ %.4f requested=%d available=%d",
+                order.side.value,
+                order.contract_side.value,
+                order.market_id,
+                order.price,
+                order.quantity,
+                available_qty,
+            )
             return None
 
         fill_price = self._vwap_for_quantity(eligible, order.quantity)
         if fill_price is None:
             return None
+
+        logger.info(
+            "[PAPER] Kalshi simulated fill: %s %s %s limit=%.4f qty=%d available=%d vwap=%.4f levels=%d",
+            order.side.value,
+            order.contract_side.value,
+            order.market_id,
+            order.price,
+            order.quantity,
+            available_qty,
+            fill_price,
+            len(eligible),
+        )
 
         return Fill(
             order=order,

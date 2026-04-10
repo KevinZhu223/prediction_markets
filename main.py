@@ -306,10 +306,12 @@ async def main():
                             if yes_contract_payout is None and result in ["yes", "no"]:
                                 yes_contract_payout = 1.0 if result == "yes" else 0.0
 
-                            # Kalshi can mark resolved contracts as finalized/determined before full settlement.
+                            # Only settle once the market is clearly resolved.
+                            # Some feeds may carry timestamps before final outcome publication.
+                            resolved_statuses = {"settled", "finalized", "determined", "resolved"}
                             if yes_contract_payout is not None and (
-                                status in {"settled", "finalized", "determined"}
-                                or settlement_ts
+                                status in resolved_statuses
+                                or result in {"yes", "no"}
                             ):
                                 logger.info(
                                     "Portfolio: %s resolved (status=%s, result=%s, payout=%.4f).",

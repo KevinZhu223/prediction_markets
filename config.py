@@ -74,6 +74,8 @@ class Config:
     # ── Latency Arb Specific ────────────────────────────────────────────
     SPOT_PRICE_JUMP_THRESHOLD: float = float(os.getenv("SPOT_PRICE_JUMP_THRESHOLD", "50.0"))
     CRYPTO_MARKET_WINDOW_MINUTES: int = int(os.getenv("CRYPTO_MARKET_WINDOW_MINUTES", "5"))
+    LATENCY_MIN_ENTRY_PRICE: float = float(os.getenv("LATENCY_MIN_ENTRY_PRICE", "0.02"))
+    LATENCY_MAX_ENTRY_PRICE: float = float(os.getenv("LATENCY_MAX_ENTRY_PRICE", "0.95"))
 
     # ── AI Market Scanner ───────────────────────────────────────────────
     SCANNER_ENABLED: bool = os.getenv("SCANNER_ENABLED", "true").lower() == "true"

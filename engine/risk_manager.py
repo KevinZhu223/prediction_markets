@@ -492,7 +492,13 @@ class RiskManager:
             self._settlements_collected += payout
             self.peak_equity = max(self.peak_equity, self.current_equity)
             del self._positions[yes_key]
-            logger.info("Settlement: %s (YES) paid $%.2f", market_id, payout)
+            logger.info(
+                "Settlement: %s (YES) qty=%d payout_per_contract=%.2f paid $%.2f",
+                market_id,
+                pos.quantity,
+                payout_per_contract,
+                payout,
+            )
             settlement_events.append(
                 {
                     "market_id": market_id,
@@ -514,7 +520,13 @@ class RiskManager:
             self._settlements_collected += payout
             self.peak_equity = max(self.peak_equity, self.current_equity)
             del self._positions[no_key]
-            logger.info("Settlement: %s (NO) paid $%.2f", market_id, payout)
+            logger.info(
+                "Settlement: %s (NO) qty=%d payout_per_contract=%.2f paid $%.2f",
+                market_id,
+                pos.quantity,
+                no_payout_per_contract,
+                payout,
+            )
             settlement_events.append(
                 {
                     "market_id": market_id,
