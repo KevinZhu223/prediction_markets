@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-
 class Config:
     """Centralized configuration loaded from environment variables."""
 

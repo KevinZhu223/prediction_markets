@@ -192,6 +192,7 @@ class MacroNewsStrategy:
         self._active = False
         self._series_market_cache: dict[str, str] = {}
         self._market_quote_cache: dict[str, dict[str, float]] = {}
+        self._active_markets_detail: dict[str, dict] = {}  # ticker -> full market dict
 
         # Upcoming releases (populated by schedule manager)
         self.upcoming_releases: list[EconomicRelease] = []
@@ -260,6 +261,9 @@ class MacroNewsStrategy:
         """
         Enter rapid-polling mode for a specific release.
         Polls the source URL every 500ms until the data appears.
+
+        Returns the first (best) signal, but submits all valid signals
+        via the signal callback if one is wired.
         """
         logger.info("Entering sniper mode for %s", release.name)
 
@@ -286,8 +290,9 @@ class MacroNewsStrategy:
                     release.consensus_estimate or 0,
                 )
 
-                # Generate signal
-                return self._generate_signal(release)
+                # Generate signals for ALL matching strike brackets
+                signals = self._generate_signals(release)
+                return signals[0] if signals else None
 
             await asyncio.sleep(self.poll_interval_fast_ms / 1000.0)
 
@@ -306,102 +311,149 @@ class MacroNewsStrategy:
             return float(result) if result else None
         return None
 
-    def _generate_signal(self, release: EconomicRelease) -> Optional[Signal]:
+    @staticmethod
+    def _extract_strike_from_market(market: dict) -> Optional[float]:
         """
-        Compare actual vs consensus and generate a trading signal.
+        Extract the numeric strike from a Kalshi market.
+
+        Priority:
+          1. floor_strike field (authoritative)
+          2. Regex on the ticker (e.g. KXCPIYOY-...-T3.30)
+          3. Regex on the title (e.g. "above 3.30%")
         """
-        if release.actual_value is None or release.consensus_estimate is None:
-            return None
+        # 1. Authoritative Kalshi field
+        fs = market.get("floor_strike")
+        if fs is not None:
+            try:
+                return float(fs)
+            except (TypeError, ValueError):
+                pass
+
+        ticker = market.get("ticker", "")
+        title = market.get("title", "")
+
+        # 2. Ticker suffix (e.g. "-T3.30", "-T200K")
+        import re
+        m = re.search(r"-T([\d.]+)", ticker)
+        if m:
+            return float(m.group(1))
+
+        # 3. Title regex
+        m = re.search(r"(?:above|over|at least|exceed)\s+([\d,.]+)", title, re.IGNORECASE)
+        if m:
+            return float(m.group(1).replace(",", ""))
+
+        return None
+
+    def _generate_signals(self, release: EconomicRelease) -> list[Signal]:
+        """
+        For a given economic release, iterate through ALL active markets
+        in the series and generate a signal for each one whose strike
+        makes it clearly decidable (actual vs strike).
+
+        This replaces the old _generate_signal() which blindly picked
+        one highest-volume market and traded based on actual vs consensus
+        instead of actual vs the specific market's strike price.
+        """
+        if release.actual_value is None:
+            return []
 
         actual = release.actual_value
-        consensus = release.consensus_estimate
-        surprise = actual - consensus
-        surprise_pct = abs(surprise / consensus) if consensus != 0 else 0
+        consensus = release.consensus_estimate or actual
+        surprise_pct = abs((actual - consensus) / consensus) if consensus != 0 else 0
 
-        if surprise_pct < self.min_surprise_pct:
+        signals: list[Signal] = []
+
+        # Iterate over every active market we've cached for this series
+        series_tickers = [
+            t for t in self._market_quote_cache
+            if t.startswith(release.kalshi_series)
+        ]
+
+        if not series_tickers:
+            # Fallback to legacy single-market behaviour if no markets cached
+            fallback = (
+                release.market_ticker
+                or self._series_market_cache.get(release.kalshi_series)
+            )
+            if fallback:
+                series_tickers = [fallback]
+
+        for ticker in series_tickers:
+            cached = self._active_markets_detail.get(ticker, {})
+            strike = self._extract_strike_from_market(cached)
+            if strike is None:
+                logger.debug("Macro: can't extract strike for %s, skipping", ticker)
+                continue
+
+            # Determine the correct side FOR THIS SPECIFIC STRIKE
+            if actual > strike:
+                # Actual value exceeds the strike → YES should settle to 1.0
+                contract_side = ContractSide.YES
+                fair_value = min(0.97, 0.80 + surprise_pct * 1.0)
+                direction = "ABOVE"
+            elif actual < strike:
+                # Actual value is below the strike → NO should settle to 1.0
+                contract_side = ContractSide.NO
+                fair_value = min(0.97, 0.80 + surprise_pct * 1.0)
+                direction = "BELOW"
+            else:
+                # Exactly on strike — too risky
+                continue
+
+            quote = self._market_quote_cache.get(ticker, {})
+            yes_bid = float(quote.get("yes_bid", 0.0) or 0.0)
+            yes_ask = float(quote.get("yes_ask", 0.0) or 0.0)
+
+            if contract_side == ContractSide.YES:
+                target_price = yes_ask if yes_ask > 0 else 0.0
+                edge = fair_value - target_price if target_price > 0 else 0.0
+            else:
+                no_ask = (1.0 - yes_bid) if yes_bid > 0 else 0.0
+                target_price = no_ask
+                edge = fair_value - target_price if target_price > 0 else 0.0
+
+            if target_price <= 0 or target_price >= 1:
+                continue
+
+            if edge < 0.04:
+                logger.debug(
+                    "Macro: %s edge too small (%.1f%%) at strike %.2f",
+                    ticker, edge * 100, strike,
+                )
+                continue
+
+            confidence = min(0.95, 0.60 + surprise_pct * 2)
+            qty = max(1, int(min(120, surprise_pct * 120 + edge * 120)))
+
+            signal = Signal(
+                strategy="macro_news",
+                action=Side.BUY,
+                contract_side=contract_side,
+                platform=Platform.KALSHI,
+                market_id=ticker,
+                target_price=target_price,
+                quantity=qty,
+                confidence=confidence,
+                reason=(
+                    f"{release.name}: actual={actual:.2f} vs strike={strike:.2f} "
+                    f"({direction}, consensus={consensus:.2f}, edge={edge:.1%})"
+                ),
+            )
+
+            signals.append(signal)
+            self._signals_generated.append(signal)
             logger.info(
-                "Macro: %s surprise too small (%.2f%%), skipping",
-                release.name, surprise_pct * 100,
+                "MACRO SIGNAL: %s %s %s -- %s",
+                signal.action.value, signal.contract_side.value,
+                signal.market_id, signal.reason,
             )
-            return None
 
-        # Determine direction
-        if surprise > 0:
-            direction = "ABOVE"
-            action = Side.BUY
-            contract_side = ContractSide.YES
-        else:
-            direction = "BELOW"
-            action = Side.BUY
-            contract_side = ContractSide.NO
-
-        # Confidence scales with surprise magnitude
-        confidence = min(0.95, 0.60 + surprise_pct * 2)
-
-        # Convert macro surprise to a rough fair YES probability.
-        if surprise > 0:
-            fair_yes = min(0.97, 0.62 + surprise_pct * 1.8)
-        else:
-            fair_yes = max(0.03, 0.38 - surprise_pct * 1.2)
-
-        market_ticker = (
-            release.market_ticker
-            or self._series_market_cache.get(release.kalshi_series)
-            or release.kalshi_series
-        )
-
-        quote = self._market_quote_cache.get(market_ticker, {})
-        yes_bid = float(quote.get("yes_bid", 0.0) or 0.0)
-        yes_ask = float(quote.get("yes_ask", 0.0) or 0.0)
-
-        target_price = 0.0
-        edge = 0.0
-        if contract_side == ContractSide.YES:
-            target_price = yes_ask if yes_ask > 0 else 0.0
-            edge = fair_yes - target_price if target_price > 0 else 0.0
-        else:
-            no_ask = (1.0 - yes_bid) if yes_bid > 0 else 0.0
-            fair_no = 1.0 - fair_yes
-            target_price = no_ask
-            edge = fair_no - target_price if target_price > 0 else 0.0
-
-        if target_price <= 0 or target_price >= 1:
-            logger.info("Macro: missing tradable quote for %s, skipping", market_ticker)
-            return None
-
-        if edge < 0.04:
-            logger.info(
-                "Macro: %s edge too small (%.1f%%) at target %.2f",
-                market_ticker,
-                edge * 100,
-                target_price,
-            )
-            return None
-
-        qty = max(1, int(min(120, surprise_pct * 120 + edge * 120)))
-
-        signal = Signal(
-            strategy="macro_news",
-            action=action,
-            contract_side=contract_side,
-            platform=Platform.KALSHI,
-            market_id=market_ticker,
-            target_price=target_price,
-            quantity=qty,
-            confidence=confidence,
-            reason=(
-                f"{release.name}: actual={actual:.2f} vs consensus={consensus:.2f} "
-                f"({direction}, surprise={surprise_pct:.1%}, edge={edge:.1%})"
-            )
-        )
-
-        self._signals_generated.append(signal)
         logger.info(
-            "MACRO SIGNAL: %s %s -- %s",
-            signal.action.value, signal.market_id, signal.reason,
+            "Macro: generated %d signals for %s (actual=%.2f, %d markets checked)",
+            len(signals), release.name, actual, len(series_tickers),
         )
-
-        return signal
+        return signals
 
     async def discover_markets(self) -> list[dict]:
         """Find active macro markets on Kalshi."""
@@ -421,6 +473,7 @@ class MacroNewsStrategy:
         # Cache one tradable ticker per series so generated signals target real markets.
         by_series: dict[str, tuple[str, float]] = {}
         quote_cache: dict[str, dict[str, float]] = {}
+        detail_cache: dict[str, dict] = {}
         for m in active:
             t = m.get("ticker", "")
             if not t:
@@ -432,6 +485,7 @@ class MacroNewsStrategy:
                 "yes_bid": yes_bid,
                 "yes_ask": yes_ask,
             }
+            detail_cache[t] = m  # Store full market detail for strike extraction
 
             volume = float(m.get("volume_fp", 0) or 0)
             for series in ["KXCPIYOY", "KXJOBS", "KXCLAIMS", "KXFEDDECISION"]:
@@ -443,6 +497,7 @@ class MacroNewsStrategy:
 
         self._series_market_cache.update({k: v[0] for k, v in by_series.items()})
         self._market_quote_cache.update(quote_cache)
+        self._active_markets_detail.update(detail_cache)
 
         return active
 

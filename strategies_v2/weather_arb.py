@@ -1,23 +1,27 @@
 """
 Hourly Weather Arbitrage Strategy
 
-Exploits the lag between real-time NOAA weather station observations and
-Kalshi's hourly temperature / precipitation markets.
+Exploits the lag between real-time weather station observations and
+Kalshi's hourly temperature markets.
 
 How it works:
-  1. Kalshi settles "Will the temperature at JFK exceed 75°F at 2 PM?"
-     based on the NOAA METAR observation for station KJFK.
-  2. NOAA publishes observations every ~5-10 minutes.
-  3. If we read the NOAA observation showing 77°F at 1:50 PM, and
-     the Kalshi YES contract is still at 85¢, there's a 15¢ edge
-     because the outcome is essentially decided.
+  1. Kalshi settles "Will the temp in NYC be above 75.99° at 1 AM EDT?"
+     based on AccuWeather METAR data for station KNYC (Central Park).
+  2. NOAA / AccuWeather METAR observations update every ~5-10 minutes.
+  3. If the observation shows 78°F at 12:50 AM, and the Kalshi YES
+     contract at strike 75.99 is still at 85¢, there's edge because
+     the outcome is essentially decided.
 
 Target Kalshi series:
-  - KXTEMPH   : Hourly temperature (e.g. "Will temp at JFK be above 75°F?")
-  - KXPRECIPH : Hourly precipitation (e.g. "Will it rain at ORD?")
+  - KXTEMPNYCH : Hourly directional NYC temperature
+  - KXHIGHNYD  : Hourly directional NYC temperature (alternate series)
 
-NOAA data source:
-  - api.weather.gov  (free, no API key required, updates every ~5 min)
+Data sources:
+  - NOAA api.weather.gov  (free, no API key, METAR observations)
+  - AccuWeather portal (Kalshi's official settlement source)
+
+IMPORTANT: Kalshi uses station KNYC (Central Park, coords 40.7812,-73.9665)
+           for NYC markets — NOT KJFK (JFK Airport).
 """
 
 import asyncio
@@ -36,10 +40,16 @@ logger = logging.getLogger(__name__)
 
 # ── NOAA Station Mappings ───────────────────────────────────────────────────
 
-# Maps Kalshi location codes to NOAA station IDs
-# These are the stations Kalshi uses for settlement
+# Maps Kalshi location codes to NOAA/METAR station IDs.
+# CRITICAL: These MUST match the stations Kalshi actually uses for settlement.
+# Verified via Kalshi API: series.settlement_sources[].url contains station=KXXX.
+#
+# As of 2026-04: Only NYC hourly temp is actively listed on Kalshi.
+# The station is KNYC (Central Park, Belvedere Castle — NOT KJFK/JFK Airport).
 STATION_MAP = {
-    "nyc":     "KJFK",   # JFK Airport, New York
+    "nyc":     "KNYC",   # Central Park, New York (Kalshi verified)
+    "new york": "KNYC",  # Alternate name match
+    "central park": "KNYC",
     "chicago": "KORD",   # O'Hare Airport, Chicago
     "la":      "KLAX",   # LAX Airport, Los Angeles
     "miami":   "KMIA",   # Miami International
@@ -384,8 +394,9 @@ class WeatherArbStrategy:
         if hours_to_expiry > self._max_hours_to_expiry:
             return None
 
-        # Parse the market to determine the station and strike
-        station_id, strike_value, market_type = self._parse_weather_market(title, ticker)
+        # Parse the market to determine the station and strike.
+        # Prefer floor_strike from market data (authoritative) over title regex.
+        station_id, strike_value, market_type = self._parse_weather_market(title, ticker, market)
         if not station_id:
             return None
         if market_type == "temperature" and strike_value <= 0:
@@ -530,49 +541,88 @@ class WeatherArbStrategy:
         return max(1, min(100, int(edge * 2)))
 
     def _parse_weather_market(
-        self, title: str, ticker: str
+        self, title: str, ticker: str, market: dict | None = None
     ) -> tuple[Optional[str], float, str]:
         """
-        Parse a Kalshi weather market title to extract station and strike.
-        
+        Parse a Kalshi weather market to extract station and strike.
+
+        Uses the market's floor_strike field (authoritative) when available,
+        falling back to regex on the title / ticker.
+
         Example titles:
-          "Temperature at JFK above 75°F at 2 PM ET"
-          "Precipitation at ORD above 0.01 in at 3 PM ET"
+          "Will the temp in NYC be above 75.99° on Apr 14, 2026 at 1am EDT?"
+        Example tickers:
+          "KXTEMPNYCH-26APR1401-T75.99"
         """
+        import re
         title_lower = title.lower()
 
-        # Determine station
+        # ── Determine station ──────────────────────────────────────────
         station_id = None
         for location, sid in STATION_MAP.items():
             if location in title_lower:
                 station_id = sid
                 break
-        # Try airport codes
+        # Try METAR codes embedded in title (e.g. "jfk", "ord")
         if not station_id:
             for sid in STATION_MAP.values():
-                if sid.lower()[1:] in title_lower:  # "jfk" from "KJFK"
+                if sid.lower()[1:] in title_lower:  # "nyc" from "KNYC"
                     station_id = sid
                     break
+        # Try to derive from series ticker (e.g. KXTEMPNYCH → NYC)
+        if not station_id:
+            ticker_upper = ticker.upper()
+            if "NYC" in ticker_upper or "NYD" in ticker_upper:
+                station_id = "KNYC"
+            elif "CHI" in ticker_upper or "ORD" in ticker_upper:
+                station_id = "KORD"
+            elif "LAX" in ticker_upper or "LA" in ticker_upper:
+                station_id = "KLAX"
+            elif "MIA" in ticker_upper:
+                station_id = "KMIA"
+            elif "DFW" in ticker_upper or "DAL" in ticker_upper:
+                station_id = "KDFW"
+            elif "DEN" in ticker_upper:
+                station_id = "KDEN"
+            elif "SEA" in ticker_upper:
+                station_id = "KSEA"
+            elif "ATL" in ticker_upper:
+                station_id = "KATL"
 
-        # Determine market type and strike
+        # ── Determine market type ──────────────────────────────────────
         market_type = ""
         strike = 0.0
 
         if "temperature" in title_lower or "temp" in title_lower:
             market_type = "temperature"
-            # Extract strike from title (e.g. "above 75°F")
-            import re
-            match = re.search(r'above\s+([\d.]+)', title_lower)
-            if match:
-                strike = float(match.group(1))
-            else:
-                match = re.search(r'(\d+)\s*°', title)
-                if match:
-                    strike = float(match.group(1))
-
         elif "precipitation" in title_lower or "rain" in title_lower or "precip" in title_lower:
             market_type = "precipitation"
             strike = 0.01  # Default: any measurable precipitation
+
+        # ── Determine strike ───────────────────────────────────────────
+        if market_type == "temperature":
+            # 1. Prefer floor_strike from market data (authoritative Kalshi field)
+            if market and market.get("floor_strike") is not None:
+                try:
+                    strike = float(market["floor_strike"])
+                except (TypeError, ValueError):
+                    strike = 0.0
+
+            # 2. Fallback: parse from ticker suffix (e.g. "-T75.99")
+            if strike <= 0:
+                match = re.search(r'-T([\d.]+)$', ticker)
+                if match:
+                    strike = float(match.group(1))
+
+            # 3. Fallback: parse from title (e.g. "above 75.99°")
+            if strike <= 0:
+                match = re.search(r'above\s+([\d.]+)', title_lower)
+                if match:
+                    strike = float(match.group(1))
+                else:
+                    match = re.search(r'([\d.]+)\s*°', title)
+                    if match:
+                        strike = float(match.group(1))
 
         return station_id, strike, market_type
 

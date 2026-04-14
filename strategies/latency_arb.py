@@ -1,7 +1,16 @@
 """
 Latency Arbitrage Strategy (Kalshi-only)
 Exploits the delay between crypto spot price movements and
-Kalshi order book updates for 5-min / 15-min recurring markets.
+Kalshi order book updates for 15-min recurring markets.
+
+KXBTC15M / KXETH15M markets are directional: "Will BTC be higher at
+the end of the 15 minutes than at the start?"  The market has a
+`floor_strike` field that is the opening reference price.  YES wins
+if the 1-minute BRTI average at close >= floor_strike.
+
+The OLD logic only reacted to local micro-jumps which caused the bot
+to buy YES during a brief bounce even when spot was still well below
+the strike.  The NEW logic checks current spot vs floor_strike.
 """
 
 import asyncio
@@ -21,8 +30,12 @@ logger = logging.getLogger(__name__)
 class LatencyArbStrategy:
     """
     Monitors Coinbase for rapid BTC/ETH price movements and generates
-    signals to sweep the corresponding 15-minute YES/NO prediction
-    markets on Kalshi before they adjust.
+    signals for the corresponding 15-minute directional prediction
+    markets on Kalshi.
+
+    Key improvement: the bot now tracks the floor_strike (interval
+    opening price) from Kalshi's market data and only generates signals
+    in the correct direction relative to the strike.
     """
 
     def __init__(self, aggregator: DataAggregator):
@@ -42,12 +55,17 @@ class LatencyArbStrategy:
             "BTCUSDT": {
                 "series": "KXBTC15M", # Default to 15-min BTC
                 "active_ticker": None,
+                "floor_strike": None,  # Opening reference price
             },
             "ETHUSDT": {
                 "series": "KXETH15M", # Default to 15-min ETH
                 "active_ticker": None,
+                "floor_strike": None,
             },
         }
+
+        # Cache the latest spot price per symbol for strike comparison
+        self._latest_spot: dict[str, float] = {}
 
     def configure_markets(self, mappings: dict[str, dict]):
         """Set the series tickers at runtime."""
@@ -71,7 +89,7 @@ class LatencyArbStrategy:
         self._active = False
 
     async def _discovery_loop(self):
-        """Periodically refresh the active tickers for each series."""
+        """Periodically refresh the active tickers and floor_strike for each series."""
         while self._active:
             try:
                 for symbol, data in self.market_mappings.items():
@@ -81,6 +99,21 @@ class LatencyArbStrategy:
                         if new_ticker and new_ticker != data.get("active_ticker"):
                             logger.info("Latency arb: updated %s active ticker to %s", symbol, new_ticker)
                             data["active_ticker"] = new_ticker
+
+                        # Fetch the floor_strike (opening reference price) for the active market
+                        if new_ticker:
+                            try:
+                                market_detail = await self.aggregator.kalshi.get_market(new_ticker)
+                                if market_detail:
+                                    fs = market_detail.get("floor_strike")
+                                    if fs is not None:
+                                        data["floor_strike"] = float(fs)
+                                        logger.info(
+                                            "Latency arb: %s floor_strike=$%.2f",
+                                            new_ticker, data["floor_strike"],
+                                        )
+                            except Exception as e:
+                                logger.debug("Latency arb: floor_strike fetch error for %s: %s", new_ticker, e)
             except Exception as e:
                 logger.error("Ticker discovery error: %s", e)
             
@@ -98,6 +131,9 @@ class LatencyArbStrategy:
         symbol = update.symbol
         now = time.time()
 
+        # Always track the latest spot price
+        self._latest_spot[symbol] = update.price
+
         # Check cooldown
         last = self._last_signal_time.get(symbol, 0)
         if now - last < self._cooldown_seconds:
@@ -105,25 +141,38 @@ class LatencyArbStrategy:
 
         data = self.market_mappings.get(symbol, {})
         active_ticker = data.get("active_ticker")
-        if not active_ticker:
+        floor_strike = data.get("floor_strike")
+        if not active_ticker or floor_strike is None:
             return
 
-        # Determine direction
-        if delta > 0:
-            signals = self._generate_up_signals(symbol, delta, active_ticker)
+        # Core fix: determine the TRUE direction relative to the interval strike.
+        # The market resolves YES if spot >= floor_strike at expiry.
+        spot = update.price
+        distance_from_strike = spot - floor_strike
+
+        # Only generate signals when the jump agrees with the strike direction.
+        if delta > 0 and distance_from_strike > 0:
+            # Price jumped UP and we're above the strike → YES is likely
+            signals = self._generate_up_signals(symbol, delta, active_ticker, spot, floor_strike)
+        elif delta < 0 and distance_from_strike < 0:
+            # Price dropped DOWN and we're below the strike → NO is likely
+            signals = self._generate_down_signals(symbol, delta, active_ticker, spot, floor_strike)
         else:
-            signals = self._generate_down_signals(symbol, delta, active_ticker)
+            # Jump direction disagrees with strike position — skip
+            return
 
         if signals:
             self._last_signal_time[symbol] = now
             return signals
 
     def _generate_up_signals(
-        self, symbol: str, delta: float, ticker: str
+        self, symbol: str, delta: float, ticker: str,
+        spot: float, floor_strike: float,
     ) -> list[Signal]:
-        """Rapid move UP: Buy YES."""
+        """Spot > strike after an UP jump: Buy YES."""
         signals = []
-        confidence = min(abs(delta) / (self.jump_threshold * 3), 0.95)
+        distance = spot - floor_strike  # positive when above strike
+        confidence = min(0.95, 0.50 + (distance / floor_strike) * 200)
 
         ob = self.aggregator.get_order_book(ticker)
         if ob and ob.best_ask is not None:
@@ -137,8 +186,8 @@ class LatencyArbStrategy:
                 )
                 return signals
 
-            # Estimate edge for BUYing YES
-            edge = self._estimate_edge(ob.best_ask, direction="up", delta=delta)
+            # Estimate edge based on distance from strike, not just micro-jump
+            edge = self._estimate_edge(ob.best_ask, distance=distance, strike=floor_strike)
             if edge >= self.min_edge:
                 signals.append(Signal(
                     strategy="latency_arb",
@@ -149,22 +198,27 @@ class LatencyArbStrategy:
                     target_price=ob.best_ask,
                     quantity=self._size_for_edge(edge),
                     confidence=confidence,
-                    reason=f"{symbol} +${delta:.2f} jump, Kalshi YES ask={ob.best_ask:.4f}, edge={edge:.4f}",
+                    reason=(
+                        f"{symbol} spot=${spot:,.2f} > strike=${floor_strike:,.2f} "
+                        f"(+${distance:,.2f}), jump=${delta:,.2f}, "
+                        f"YES ask={ob.best_ask:.4f}, edge={edge:.4f}"
+                    ),
                 ))
 
         return signals
 
     def _generate_down_signals(
-        self, symbol: str, delta: float, ticker: str
+        self, symbol: str, delta: float, ticker: str,
+        spot: float, floor_strike: float,
     ) -> list[Signal]:
-        """Rapid move DOWN: Buy NO."""
+        """Spot < strike after a DOWN jump: Buy NO."""
         signals = []
-        confidence = min(abs(delta) / (self.jump_threshold * 3), 0.95)
+        distance = floor_strike - spot  # positive when below strike
+        confidence = min(0.95, 0.50 + (distance / floor_strike) * 200)
 
         ob = self.aggregator.get_order_book(ticker)
         if ob and ob.best_bid is not None:
             # Buying NO at (1 - YES_bid)
-            # If YES Bid is 0.40, price to buy NO is 0.60
             no_ask = 1.0 - ob.best_bid
             if not (self._min_entry_price <= no_ask <= self._max_entry_price):
                 logger.debug(
@@ -176,7 +230,7 @@ class LatencyArbStrategy:
                 )
                 return signals
 
-            edge = self._estimate_edge(no_ask, direction="down", delta=delta)
+            edge = self._estimate_edge(no_ask, distance=distance, strike=floor_strike)
             
             if edge >= self.min_edge:
                 signals.append(Signal(
@@ -188,21 +242,35 @@ class LatencyArbStrategy:
                     target_price=no_ask,
                     quantity=self._size_for_edge(edge),
                     confidence=confidence,
-                    reason=f"{symbol} -${abs(delta):.2f} drop, Kalshi NO ask={no_ask:.4f} (from YES bid={ob.best_bid:.4f}), edge={edge:.4f}",
+                    reason=(
+                        f"{symbol} spot=${spot:,.2f} < strike=${floor_strike:,.2f} "
+                        f"(-${distance:,.2f}), jump=${delta:,.2f}, "
+                        f"NO ask={no_ask:.4f}, edge={edge:.4f}"
+                    ),
                 ))
 
         return signals
 
-    def _estimate_edge(self, current_ask: float, direction: str, delta: float) -> float:
-        """Estimate the edge vs fair value."""
-        delta_abs = abs(delta)
-        if delta_abs >= 200:
-            fair_value = 0.85
-        elif delta_abs >= 150:
-            fair_value = 0.78
-        elif delta_abs >= 100:
-            fair_value = 0.70
-        elif delta_abs >= 75:
+    def _estimate_edge(self, current_ask: float, *, distance: float, strike: float) -> float:
+        """
+        Estimate the edge vs fair value based on distance from the floor_strike.
+
+        distance: absolute $ distance between spot and strike (always positive).
+        strike:   the floor_strike value, used for normalisation.
+        """
+        if strike <= 0:
+            return 0.0
+
+        pct_distance = distance / strike  # e.g. $200 / $80000 = 0.25%
+
+        # Map distance-from-strike percentage to an estimated fair probability
+        if pct_distance >= 0.005:      # >=0.5% away from strike
+            fair_value = 0.88
+        elif pct_distance >= 0.003:    # >=0.3%
+            fair_value = 0.80
+        elif pct_distance >= 0.002:    # >=0.2%
+            fair_value = 0.72
+        elif pct_distance >= 0.001:    # >=0.1%
             fair_value = 0.62
         else:
             fair_value = 0.55
