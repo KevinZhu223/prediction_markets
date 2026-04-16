@@ -437,6 +437,7 @@ class WeatherArbStrategy:
             yes_bid=yes_bid,
             yes_ask=yes_ask,
             station_id=station_id,
+            hours_to_expiry=hours_to_expiry,
         )
 
         if signal:
@@ -472,17 +473,41 @@ class WeatherArbStrategy:
         yes_bid: float,
         yes_ask: float,
         station_id: str,
+        hours_to_expiry: float = 1.0,
     ) -> Optional[Signal]:
         """
-        Core signal generation logic.
+        Core signal generation logic with time-decay awareness.
+
+        The required confidence margin scales dynamically with time-to-expiry:
+          - 2.0h out: need 4.0°F margin  (weather can shift a lot)
+          - 1.0h out: need 2.5°F margin
+          - 0.5h out: need 1.5°F margin
+          - 0.25h out: need 1.0°F margin  (nearly settled)
+
+        This prevents the bot from entering trades hours early based on
+        momentary temperature readings that can drift before settlement.
         """
+        # Dynamic margin: scales linearly from 1.0°F (at 0h) to 4.0°F (at 2h)
+        dynamic_margin = max(1.0, 1.0 + (hours_to_expiry * 1.5))
+
+        # Time-based fair value multiplier (similar to latency arb theta)
+        if hours_to_expiry <= 0.25:
+            time_multiplier = 1.0    # 15 min or less — nearly settled
+        elif hours_to_expiry <= 0.5:
+            time_multiplier = 0.90   # 30 min — high confidence
+        elif hours_to_expiry <= 1.0:
+            time_multiplier = 0.75   # 1 hour — moderate
+        else:
+            time_multiplier = 0.55   # 1-2 hours — weather can shift
+
         if market_type == "temperature":
             # "Above X°F" market
             diff = observed - strike
 
-            if diff > self.temp_confidence_margin:
-                # Temperature is clearly above strike → YES should be ~0.95+
-                fair_value = min(0.95, 0.80 + (diff / 10.0) * 0.15)
+            if diff > dynamic_margin:
+                # Temperature is clearly above strike → YES should be high
+                base_fair = min(0.95, 0.80 + (diff / 10.0) * 0.15)
+                fair_value = 0.50 + (base_fair - 0.50) * time_multiplier
                 if yes_ask < fair_value - 0.05:
                     edge = (fair_value - yes_ask) * 100  # cents
                     if edge >= self.min_edge_cents:
@@ -494,13 +519,18 @@ class WeatherArbStrategy:
                             market_id=ticker,
                             target_price=yes_ask,
                             quantity=self._calculate_size(edge),
-                            confidence=min(0.95, 0.70 + diff * 0.05),
-                            reason=f"NOAA {station_id}: {observed:.1f}°F > strike {strike:.1f}°F by {diff:.1f}°",
+                            confidence=min(0.95, 0.70 + diff * 0.05) * time_multiplier,
+                            reason=(
+                                f"NOAA {station_id}: {observed:.1f}°F > strike {strike:.1f}°F "
+                                f"by {diff:.1f}° (margin={dynamic_margin:.1f}°, "
+                                f"fair={fair_value:.2f}, {hours_to_expiry:.1f}h left)"
+                            ),
                         )
 
-            elif diff < -self.temp_confidence_margin:
-                # Temperature is clearly below strike → NO should be ~0.95+
-                fair_no = min(0.95, 0.80 + (abs(diff) / 10.0) * 0.15)
+            elif diff < -dynamic_margin:
+                # Temperature is clearly below strike → NO should be high
+                base_fair_no = min(0.95, 0.80 + (abs(diff) / 10.0) * 0.15)
+                fair_no = 0.50 + (base_fair_no - 0.50) * time_multiplier
                 no_ask = 1.0 - yes_bid  # price to buy NO
                 if no_ask < fair_no - 0.05:
                     edge = (fair_no - no_ask) * 100
@@ -513,8 +543,12 @@ class WeatherArbStrategy:
                             market_id=ticker,
                             target_price=no_ask,
                             quantity=self._calculate_size(edge),
-                            confidence=min(0.95, 0.70 + abs(diff) * 0.05),
-                            reason=f"NOAA {station_id}: {observed:.1f}°F < strike {strike:.1f}°F",
+                            confidence=min(0.95, 0.70 + abs(diff) * 0.05) * time_multiplier,
+                            reason=(
+                                f"NOAA {station_id}: {observed:.1f}°F < strike {strike:.1f}°F "
+                                f"by {abs(diff):.1f}° (margin={dynamic_margin:.1f}°, "
+                                f"fair={fair_no:.2f}, {hours_to_expiry:.1f}h left)"
+                            ),
                         )
 
         elif market_type == "precipitation":

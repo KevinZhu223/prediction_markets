@@ -36,6 +36,7 @@ from strategies_v2.weather_arb import WeatherArbStrategy
 from strategies_v2.macro_news import MacroNewsStrategy
 from strategies_v2.equity_index_arb import EquityIndexArbStrategy
 from strategies_v2.transcript_sniper import TranscriptSniperStrategy
+from strategies_v2.forex_arb import ForexArbStrategy
 
 console = Console()
 
@@ -73,6 +74,7 @@ def render_dashboard(
     macro: MacroNewsStrategy,
     equity: EquityIndexArbStrategy,
     transcript: TranscriptSniperStrategy,
+    forex: ForexArbStrategy,
 ) -> Group:
     """Render a live dashboard table with bot stats."""
     risk_stats = risk_manager.get_stats()
@@ -82,6 +84,7 @@ def render_dashboard(
     macro_stats = macro.get_stats()
     equity_stats = equity.get_stats()
     transcript_stats = transcript.get_stats()
+    forex_stats = forex.get_stats()
 
     table = Table(title="Prediction Market Bot -- Full Dashboard", expand=True)
     table.add_column("Metric", style="cyan", width=32)
@@ -131,6 +134,10 @@ def render_dashboard(
     table.add_row("--- Transcript Sniper ---", "")
     table.add_row("Targets Monitored", str(transcript_stats['targets']))
     table.add_row("Keywords Detected", str(transcript_stats['keywords_detected']))
+
+    table.add_row("--- Forex Arb ---", "")
+    table.add_row("Active Forex Markets", str(forex_stats.get('active_markets', 0)))
+    table.add_row("Forex Signals", str(forex_stats.get('signals_generated', 0)))
 
     # Spot prices
     table.add_row("--- Spot Prices ---", "")
@@ -236,6 +243,7 @@ async def main():
         openai_api_key=Config.OPENAI_API_KEY,
         enable_whisper=Config.TRANSCRIPT_ENABLE_WHISPER,
     )
+    forex = ForexArbStrategy(kalshi_exchange=kalshi)
 
     # -- Connect to Kalshi --
     try:
@@ -274,6 +282,10 @@ async def main():
     await macro.start()
     await equity.start()
     await transcript.start()
+    if Config.FOREX_ENABLED:
+        await forex.start()
+    else:
+        logger.info("Forex arb: disabled (FOREX_ENABLED=false)")
 
     # Discover mention markets for transcript sniper
     try:
@@ -327,8 +339,13 @@ async def main():
     tasks.append(asyncio.create_task(
         macro.run_loop(signal_callback=executor.submit_signal)
     ))
+    if Config.FOREX_ENABLED:
+        tasks.append(asyncio.create_task(
+            forex.run_loop(signal_callback=executor.submit_signal)
+        ))
 
-    console.print("[yellow]Experimental HFT strategies running (Warning: Risk of Adverse Selection!)[/yellow]\n")
+    console.print("[yellow]Experimental HFT strategies running (Warning: Risk of Adverse Selection!)[/yellow]")
+    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex[/green]\n")
 
     async def portfolio_monitor_loop():
         """Monitor open positions and settle resolved markets."""
@@ -394,7 +411,7 @@ async def main():
         console.clear()
         with Live(
             render_dashboard(risk_manager, executor, ai_scanner, crypto_feed,
-                           weather, macro, equity, transcript),
+                           weather, macro, equity, transcript, forex),
             refresh_per_second=1,
             console=console,
             transient=False,
@@ -403,7 +420,7 @@ async def main():
                 try:
                     dash = render_dashboard(
                         risk_manager, executor, ai_scanner, crypto_feed,
-                        weather, macro, equity, transcript
+                        weather, macro, equity, transcript, forex
                     )
                     live.update(dash)
                 except Exception:
@@ -422,6 +439,7 @@ async def main():
         await macro.stop()
         await equity.stop()
         await transcript.stop()
+        await forex.stop()
         await executor.stop()
         await crypto_feed.stop()
         await kalshi.disconnect()

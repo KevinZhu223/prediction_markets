@@ -9,4 +9,5 @@ Modules:
   - macro_news:        CPI / NFP / Fed Decision sniper via government feeds
   - equity_index_arb:  S&P 500 / Nasdaq-100 close prediction arb
   - transcript_sniper: Real-time audio transcription for mention markets
+  - forex_arb:         EUR/USD & USD/JPY hourly directional arb via Yahoo Finance
 """

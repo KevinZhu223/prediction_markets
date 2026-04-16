@@ -11,6 +11,12 @@ if the 1-minute BRTI average at close >= floor_strike.
 The OLD logic only reacted to local micro-jumps which caused the bot
 to buy YES during a brief bounce even when spot was still well below
 the strike.  The NEW logic checks current spot vs floor_strike.
+
+TIME-DECAY FIX (v3): The bot now tracks the expiration time of each
+15-minute interval.  Fair-value estimates are scaled DOWN when there
+is a lot of time remaining (price can retrace), and scaled UP in the
+final 1-3 minutes when the outcome is nearly locked in.  This prevents
+the bot from overpaying for contracts early in the interval.
 """
 
 import asyncio
@@ -100,7 +106,7 @@ class LatencyArbStrategy:
                             logger.info("Latency arb: updated %s active ticker to %s", symbol, new_ticker)
                             data["active_ticker"] = new_ticker
 
-                        # Fetch the floor_strike (opening reference price) for the active market
+                        # Fetch the floor_strike and expiration_time for the active market
                         if new_ticker:
                             try:
                                 market_detail = await self.aggregator.kalshi.get_market(new_ticker)
@@ -108,10 +114,23 @@ class LatencyArbStrategy:
                                     fs = market_detail.get("floor_strike")
                                     if fs is not None:
                                         data["floor_strike"] = float(fs)
-                                        logger.info(
-                                            "Latency arb: %s floor_strike=$%.2f",
-                                            new_ticker, data["floor_strike"],
-                                        )
+
+                                    # Cache the expiration time so we can compute time-to-expiry
+                                    exp_str = market_detail.get("expiration_time", "")
+                                    if exp_str:
+                                        try:
+                                            from datetime import datetime, timezone
+                                            exp_dt = datetime.fromisoformat(exp_str.replace("Z", "+00:00"))
+                                            data["expiration_ts"] = exp_dt.timestamp()
+                                        except Exception:
+                                            pass
+
+                                    logger.info(
+                                        "Latency arb: %s floor_strike=$%.2f, expires_in=%.1fmin",
+                                        new_ticker,
+                                        data.get("floor_strike", 0),
+                                        max(0, (data.get("expiration_ts", 0) - time.time())) / 60.0,
+                                    )
                             except Exception as e:
                                 logger.debug("Latency arb: floor_strike fetch error for %s: %s", new_ticker, e)
             except Exception as e:
@@ -145,6 +164,20 @@ class LatencyArbStrategy:
         if not active_ticker or floor_strike is None:
             return
 
+        # Compute minutes remaining until this 15-minute interval expires
+        expiration_ts = data.get("expiration_ts")
+        if expiration_ts is None:
+            return
+        minutes_remaining = max(0.0, (expiration_ts - now) / 60.0)
+
+        # Gate: skip if market already expired (stale ticker)
+        if minutes_remaining <= 0:
+            return
+
+        # Gate: configurable max minutes before expiry (default 15 = entire interval)
+        if minutes_remaining > Config.LATENCY_MAX_MINUTES_BEFORE_EXPIRY:
+            return
+
         # Core fix: determine the TRUE direction relative to the interval strike.
         # The market resolves YES if spot >= floor_strike at expiry.
         spot = update.price
@@ -153,10 +186,10 @@ class LatencyArbStrategy:
         # Only generate signals when the jump agrees with the strike direction.
         if delta > 0 and distance_from_strike > 0:
             # Price jumped UP and we're above the strike → YES is likely
-            signals = self._generate_up_signals(symbol, delta, active_ticker, spot, floor_strike)
+            signals = self._generate_up_signals(symbol, delta, active_ticker, spot, floor_strike, minutes_remaining)
         elif delta < 0 and distance_from_strike < 0:
             # Price dropped DOWN and we're below the strike → NO is likely
-            signals = self._generate_down_signals(symbol, delta, active_ticker, spot, floor_strike)
+            signals = self._generate_down_signals(symbol, delta, active_ticker, spot, floor_strike, minutes_remaining)
         else:
             # Jump direction disagrees with strike position — skip
             return
@@ -167,12 +200,15 @@ class LatencyArbStrategy:
 
     def _generate_up_signals(
         self, symbol: str, delta: float, ticker: str,
-        spot: float, floor_strike: float,
+        spot: float, floor_strike: float, minutes_remaining: float,
     ) -> list[Signal]:
         """Spot > strike after an UP jump: Buy YES."""
         signals = []
         distance = spot - floor_strike  # positive when above strike
         confidence = min(0.95, 0.50 + (distance / floor_strike) * 200)
+
+        # Apply time-decay to confidence: early-interval signals are unreliable
+        confidence = self._apply_time_decay_confidence(confidence, minutes_remaining)
 
         ob = self.aggregator.get_order_book(ticker)
         if ob and ob.best_ask is not None:
@@ -186,8 +222,8 @@ class LatencyArbStrategy:
                 )
                 return signals
 
-            # Estimate edge based on distance from strike, not just micro-jump
-            edge = self._estimate_edge(ob.best_ask, distance=distance, strike=floor_strike)
+            # Estimate edge with time-decay: early signals get much lower fair values
+            edge = self._estimate_edge(ob.best_ask, distance=distance, strike=floor_strike, minutes_remaining=minutes_remaining)
             if edge >= self.min_edge:
                 signals.append(Signal(
                     strategy="latency_arb",
@@ -196,12 +232,13 @@ class LatencyArbStrategy:
                     platform=Platform.KALSHI,
                     market_id=ticker,
                     target_price=ob.best_ask,
-                    quantity=self._size_for_edge(edge),
+                    quantity=self._size_for_edge(edge, minutes_remaining),
                     confidence=confidence,
                     reason=(
                         f"{symbol} spot=${spot:,.2f} > strike=${floor_strike:,.2f} "
                         f"(+${distance:,.2f}), jump=${delta:,.2f}, "
-                        f"YES ask={ob.best_ask:.4f}, edge={edge:.4f}"
+                        f"YES ask={ob.best_ask:.4f}, edge={edge:.4f}, "
+                        f"mins_left={minutes_remaining:.1f}"
                     ),
                 ))
 
@@ -209,12 +246,15 @@ class LatencyArbStrategy:
 
     def _generate_down_signals(
         self, symbol: str, delta: float, ticker: str,
-        spot: float, floor_strike: float,
+        spot: float, floor_strike: float, minutes_remaining: float,
     ) -> list[Signal]:
         """Spot < strike after a DOWN jump: Buy NO."""
         signals = []
         distance = floor_strike - spot  # positive when below strike
         confidence = min(0.95, 0.50 + (distance / floor_strike) * 200)
+
+        # Apply time-decay to confidence
+        confidence = self._apply_time_decay_confidence(confidence, minutes_remaining)
 
         ob = self.aggregator.get_order_book(ticker)
         if ob and ob.best_bid is not None:
@@ -230,7 +270,7 @@ class LatencyArbStrategy:
                 )
                 return signals
 
-            edge = self._estimate_edge(no_ask, distance=distance, strike=floor_strike)
+            edge = self._estimate_edge(no_ask, distance=distance, strike=floor_strike, minutes_remaining=minutes_remaining)
             
             if edge >= self.min_edge:
                 signals.append(Signal(
@@ -240,44 +280,125 @@ class LatencyArbStrategy:
                     platform=Platform.KALSHI,
                     market_id=ticker,
                     target_price=no_ask,
-                    quantity=self._size_for_edge(edge),
+                    quantity=self._size_for_edge(edge, minutes_remaining),
                     confidence=confidence,
                     reason=(
                         f"{symbol} spot=${spot:,.2f} < strike=${floor_strike:,.2f} "
                         f"(-${distance:,.2f}), jump=${delta:,.2f}, "
-                        f"NO ask={no_ask:.4f}, edge={edge:.4f}"
+                        f"NO ask={no_ask:.4f}, edge={edge:.4f}, "
+                        f"mins_left={minutes_remaining:.1f}"
                     ),
                 ))
 
         return signals
 
-    def _estimate_edge(self, current_ask: float, *, distance: float, strike: float) -> float:
+    @staticmethod
+    def _apply_time_decay_confidence(raw_confidence: float, minutes_remaining: float) -> float:
         """
-        Estimate the edge vs fair value based on distance from the floor_strike.
+        Scale down confidence for early-interval signals.
+
+        With 14 minutes left, BTC can retrace any move.  With 1 minute left
+        the observation is nearly final.  We linearly interpolate a discount
+        factor from 0.40 (at 15 min) to 1.0 (at 0 min), clamped.
+        """
+        if minutes_remaining <= 1.0:
+            decay = 1.0       # full confidence — essentially settled
+        elif minutes_remaining <= 3.0:
+            decay = 0.85      # high confidence — very little time to retrace
+        elif minutes_remaining <= 5.0:
+            decay = 0.65      # moderate — still risky
+        elif minutes_remaining <= 10.0:
+            decay = 0.45      # low — lots of time for reversion
+        else:
+            decay = 0.35      # very low — basically a coinflip for the bot
+        return raw_confidence * decay
+
+    def _estimate_edge(
+        self, current_ask: float, *, distance: float, strike: float,
+        minutes_remaining: float,
+    ) -> float:
+        """
+        Estimate the edge vs fair value based on distance from the floor_strike
+        AND the time remaining in the 15-minute interval.
+
+        The key insight: a 0.5% distance from strike with 14 minutes left is
+        NOT worth 88¢.  With 14 minutes of BTC volatility ahead, it's closer
+        to 55¢.  But with 1 minute left, the same distance IS worth 90¢+.
 
         distance: absolute $ distance between spot and strike (always positive).
         strike:   the floor_strike value, used for normalisation.
+        minutes_remaining: minutes until the 15-minute interval expires.
         """
         if strike <= 0:
             return 0.0
 
         pct_distance = distance / strike  # e.g. $200 / $80000 = 0.25%
 
-        # Map distance-from-strike percentage to an estimated fair probability
+        # Base fair value from distance (this was the old static model)
         if pct_distance >= 0.005:      # >=0.5% away from strike
-            fair_value = 0.88
+            base_fair = 0.92
         elif pct_distance >= 0.003:    # >=0.3%
-            fair_value = 0.80
+            base_fair = 0.82
         elif pct_distance >= 0.002:    # >=0.2%
-            fair_value = 0.72
+            base_fair = 0.72
         elif pct_distance >= 0.001:    # >=0.1%
-            fair_value = 0.62
+            base_fair = 0.62
         else:
-            fair_value = 0.55
+            base_fair = 0.55
 
-        return max(fair_value - current_ask, 0.0)
+        # TIME DECAY: scale the fair value based on minutes remaining.
+        # Late in the interval the fair value holds.  Early, the market is
+        # basically a coinflip and the "fair" price is much lower because
+        # BTC can retrace easily.
+        if minutes_remaining <= 1.0:
+            # Final minute — price is locked in, full fair value
+            time_multiplier = 1.0
+        elif minutes_remaining <= 3.0:
+            # Last 3 minutes — high conviction zone
+            time_multiplier = 0.90
+        elif minutes_remaining <= 5.0:
+            # 3-5 minutes — moderate conviction
+            time_multiplier = 0.70
+        elif minutes_remaining <= 10.0:
+            # 5-10 minutes — lots of reversion risk
+            time_multiplier = 0.50
+        else:
+            # >10 minutes — very early, near coinflip territory
+            time_multiplier = 0.40
 
-    def _size_for_edge(self, edge: float) -> int:
-        if edge >= 0.15: return 100
-        if edge >= 0.10: return 50
-        return 20
+        # The time-adjusted fair value
+        adjusted_fair = 0.50 + (base_fair - 0.50) * time_multiplier
+
+        edge = max(adjusted_fair - current_ask, 0.0)
+
+        logger.debug(
+            "Latency edge calc: dist_pct=%.4f%%, base_fair=%.2f, "
+            "time_mult=%.2f (%.1fmin), adj_fair=%.2f, ask=%.2f, edge=%.4f",
+            pct_distance * 100, base_fair, time_multiplier,
+            minutes_remaining, adjusted_fair, current_ask, edge,
+        )
+
+        return edge
+
+    def _size_for_edge(self, edge: float, minutes_remaining: float) -> int:
+        """
+        Position sizing that scales with both edge magnitude AND time remaining.
+        We size up aggressively in the final minutes when our signal is reliable,
+        and stay small early when there's high reversion risk.
+        """
+        # Base size from edge
+        if edge >= 0.15:
+            base_size = 100
+        elif edge >= 0.10:
+            base_size = 50
+        else:
+            base_size = 20
+
+        # Time-based size multiplier: bigger in the final minutes
+        if minutes_remaining <= 2.0:
+            return base_size            # full size — high conviction window
+        elif minutes_remaining <= 5.0:
+            return max(1, base_size // 2)   # half size — moderate conviction
+        else:
+            return max(1, base_size // 5)   # 1/5 size — probing only
+
