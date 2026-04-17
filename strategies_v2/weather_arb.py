@@ -241,8 +241,8 @@ class WeatherArbStrategy:
 
         # Configuration
         self.poll_interval_seconds = 120  # Check every 2 minutes
-        self.temp_confidence_margin = 2.0  # °F margin for high confidence
-        self.min_edge_cents = 5  # Minimum edge to trade (5¢)
+        self.temp_confidence_margin = 4.0  # °F margin for high confidence (ULTRA CONSERVATIVE)
+        self.min_edge_cents = 10  # Minimum edge to trade (10¢)
         self._observation_max_age_seconds = max(60.0, Config.WEATHER_OBSERVATION_MAX_AGE_SECONDS)
         self._obs_cache_ttl_seconds = max(5.0, Config.WEATHER_OBS_CACHE_TTL_SECONDS)
         self._max_markets_per_scan = max(10, Config.WEATHER_MAX_MARKETS_PER_SCAN)
@@ -487,8 +487,9 @@ class WeatherArbStrategy:
         This prevents the bot from entering trades hours early based on
         momentary temperature readings that can drift before settlement.
         """
-        # Dynamic margin: scales linearly from 1.0°F (at 0h) to 4.0°F (at 2h)
-        dynamic_margin = max(1.0, 1.0 + (hours_to_expiry * 1.5))
+        # Dynamic margin: scales linearly from 3.0°F (at 0h) to 7.0°F (at 2h)
+        # ULTRA CONSERVATIVE: requires overwhelming temp evidence to trade
+        dynamic_margin = max(3.0, 3.0 + (hours_to_expiry * 4.0))
 
         # Time-based fair value multiplier (similar to latency arb theta)
         if hours_to_expiry <= 0.25:

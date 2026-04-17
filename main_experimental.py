@@ -37,6 +37,7 @@ from strategies_v2.macro_news import MacroNewsStrategy
 from strategies_v2.equity_index_arb import EquityIndexArbStrategy
 from strategies_v2.transcript_sniper import TranscriptSniperStrategy
 from strategies_v2.forex_arb import ForexArbStrategy
+from strategies_v2.tennis_arb import TennisArbStrategy
 
 console = Console()
 
@@ -75,6 +76,7 @@ def render_dashboard(
     equity: EquityIndexArbStrategy,
     transcript: TranscriptSniperStrategy,
     forex: ForexArbStrategy,
+    tennis: TennisArbStrategy,
 ) -> Group:
     """Render a live dashboard table with bot stats."""
     risk_stats = risk_manager.get_stats()
@@ -85,6 +87,7 @@ def render_dashboard(
     equity_stats = equity.get_stats()
     transcript_stats = transcript.get_stats()
     forex_stats = forex.get_stats()
+    tennis_stats = tennis.get_stats()
 
     table = Table(title="Prediction Market Bot -- Full Dashboard", expand=True)
     table.add_column("Metric", style="cyan", width=32)
@@ -138,6 +141,10 @@ def render_dashboard(
     table.add_row("--- Forex Arb ---", "")
     table.add_row("Active Forex Markets", str(forex_stats.get('active_markets', 0)))
     table.add_row("Forex Signals", str(forex_stats.get('signals_generated', 0)))
+
+    table.add_row("--- Tennis Arb (ESPN) ---", "")
+    table.add_row("Active Tennis Markets", str(tennis_stats.get('active_markets', 0)))
+    table.add_row("Tennis Signals", str(tennis_stats.get('signals_generated', 0)))
 
     # Spot prices
     table.add_row("--- Spot Prices ---", "")
@@ -244,6 +251,7 @@ async def main():
         enable_whisper=Config.TRANSCRIPT_ENABLE_WHISPER,
     )
     forex = ForexArbStrategy(kalshi_exchange=kalshi)
+    tennis = TennisArbStrategy(kalshi_exchange=kalshi)
 
     # -- Connect to Kalshi --
     try:
@@ -286,6 +294,10 @@ async def main():
         await forex.start()
     else:
         logger.info("Forex arb: disabled (FOREX_ENABLED=false)")
+    if Config.TENNIS_ENABLED:
+        await tennis.start()
+    else:
+        logger.info("Tennis arb: disabled (TENNIS_ENABLED=false)")
 
     # Discover mention markets for transcript sniper
     try:
@@ -343,9 +355,13 @@ async def main():
         tasks.append(asyncio.create_task(
             forex.run_loop(signal_callback=executor.submit_signal)
         ))
+    if Config.TENNIS_ENABLED:
+        tasks.append(asyncio.create_task(
+            tennis.run_loop(signal_callback=executor.submit_signal)
+        ))
 
     console.print("[yellow]Experimental HFT strategies running (Warning: Risk of Adverse Selection!)[/yellow]")
-    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex[/green]\n")
+    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex, Tennis[/green]\n")
 
     async def portfolio_monitor_loop():
         """Monitor open positions and settle resolved markets."""
@@ -411,7 +427,7 @@ async def main():
         console.clear()
         with Live(
             render_dashboard(risk_manager, executor, ai_scanner, crypto_feed,
-                           weather, macro, equity, transcript, forex),
+                           weather, macro, equity, transcript, forex, tennis),
             refresh_per_second=1,
             console=console,
             transient=False,
@@ -420,7 +436,7 @@ async def main():
                 try:
                     dash = render_dashboard(
                         risk_manager, executor, ai_scanner, crypto_feed,
-                        weather, macro, equity, transcript, forex
+                        weather, macro, equity, transcript, forex, tennis
                     )
                     live.update(dash)
                 except Exception:
@@ -440,6 +456,7 @@ async def main():
         await equity.stop()
         await transcript.stop()
         await forex.stop()
+        await tennis.stop()
         await executor.stop()
         await crypto_feed.stop()
         await kalshi.disconnect()

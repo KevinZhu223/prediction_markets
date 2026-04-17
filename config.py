@@ -75,7 +75,7 @@ class Config:
     CRYPTO_MARKET_WINDOW_MINUTES: int = int(os.getenv("CRYPTO_MARKET_WINDOW_MINUTES", "5"))
     LATENCY_MIN_ENTRY_PRICE: float = float(os.getenv("LATENCY_MIN_ENTRY_PRICE", "0.02"))
     LATENCY_MAX_ENTRY_PRICE: float = float(os.getenv("LATENCY_MAX_ENTRY_PRICE", "0.95"))
-    LATENCY_MAX_MINUTES_BEFORE_EXPIRY: float = float(os.getenv("LATENCY_MAX_MINUTES_BEFORE_EXPIRY", "15.0"))
+    LATENCY_MAX_MINUTES_BEFORE_EXPIRY: float = float(os.getenv("LATENCY_MAX_MINUTES_BEFORE_EXPIRY", "5.0"))
 
     # ── AI Market Scanner ───────────────────────────────────────────────
     SCANNER_ENABLED: bool = os.getenv("SCANNER_ENABLED", "true").lower() == "true"
@@ -111,7 +111,7 @@ class Config:
         os.getenv("WEATHER_SIGNAL_COOLDOWN_SECONDS", "900.0")
     )
     WEATHER_MAX_SPREAD: float = float(os.getenv("WEATHER_MAX_SPREAD", "0.14"))
-    WEATHER_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("WEATHER_MAX_HOURS_TO_EXPIRY", "2.0"))
+    WEATHER_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("WEATHER_MAX_HOURS_TO_EXPIRY", "0.5"))
     EQUITY_SIGNAL_COOLDOWN_SECONDS: float = float(
         os.getenv("EQUITY_SIGNAL_COOLDOWN_SECONDS", "240.0")
     )
@@ -133,6 +133,13 @@ class Config:
     FOREX_MAX_SPREAD: float = float(os.getenv("FOREX_MAX_SPREAD", "0.12"))
     FOREX_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("FOREX_MAX_HOURS_TO_EXPIRY", "1.0"))
     FOREX_SIGNAL_COOLDOWN_SECONDS: float = float(os.getenv("FOREX_SIGNAL_COOLDOWN_SECONDS", "300.0"))
+
+    # ── Tennis Arb ─────────────────────────────────────────────────────
+    TENNIS_ENABLED: bool = os.getenv("TENNIS_ENABLED", "true").lower() == "true"
+    TENNIS_POLL_INTERVAL_SECONDS: float = float(os.getenv("TENNIS_POLL_INTERVAL_SECONDS", "45.0"))
+    TENNIS_MIN_EDGE: float = float(os.getenv("TENNIS_MIN_EDGE", "0.07"))
+    TENNIS_MAX_SPREAD: float = float(os.getenv("TENNIS_MAX_SPREAD", "0.12"))
+    TENNIS_SIGNAL_COOLDOWN_SECONDS: float = float(os.getenv("TENNIS_SIGNAL_COOLDOWN_SECONDS", "300.0"))
 
     # ── API Rate Limiting / Backoff ─────────────────────────────────────
     KALSHI_MAX_CONCURRENT_REQUESTS: int = int(os.getenv("KALSHI_MAX_CONCURRENT_REQUESTS", "8"))
