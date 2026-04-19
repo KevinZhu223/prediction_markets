@@ -182,6 +182,17 @@ class LatencyArbStrategy:
         # The market resolves YES if spot >= floor_strike at expiry.
         spot = update.price
         distance_from_strike = spot - floor_strike
+        pct_distance = abs(distance_from_strike) / floor_strike if floor_strike > 0 else 0
+
+        # HARD GATE: Block all signals when >5 minutes remain UNLESS
+        # the move is extraordinary (>0.5% from strike). Small moves with
+        # 10+ minutes left are just noise and will revert.
+        if minutes_remaining > 5.0 and pct_distance < 0.005:
+            return
+
+        # Also require a minimum absolute distance to avoid noise trades
+        if pct_distance < 0.0015:  # 0.15% minimum (~$120 on BTC)
+            return
 
         # Only generate signals when the jump agrees with the strike direction.
         if delta > 0 and distance_from_strike > 0:
@@ -298,19 +309,20 @@ class LatencyArbStrategy:
         Scale down confidence for early-interval signals.
 
         With 14 minutes left, BTC can retrace any move.  With 1 minute left
-        the observation is nearly final.  We linearly interpolate a discount
-        factor from 0.40 (at 15 min) to 1.0 (at 0 min), clamped.
+        the observation is nearly final.  v4: Much more aggressive discounting.
         """
         if minutes_remaining <= 1.0:
             decay = 1.0       # full confidence — essentially settled
+        elif minutes_remaining <= 2.0:
+            decay = 0.90      # very high — locked in
         elif minutes_remaining <= 3.0:
-            decay = 0.85      # high confidence — very little time to retrace
+            decay = 0.75      # high confidence
         elif minutes_remaining <= 5.0:
-            decay = 0.65      # moderate — still risky
+            decay = 0.55      # moderate — BTC moves fast
         elif minutes_remaining <= 10.0:
-            decay = 0.45      # low — lots of time for reversion
+            decay = 0.30      # low — lots of time for reversion
         else:
-            decay = 0.35      # very low — basically a coinflip for the bot
+            decay = 0.20      # very low — basically noise
         return raw_confidence * decay
 
     def _estimate_edge(
@@ -321,9 +333,13 @@ class LatencyArbStrategy:
         Estimate the edge vs fair value based on distance from the floor_strike
         AND the time remaining in the 15-minute interval.
 
-        The key insight: a 0.5% distance from strike with 14 minutes left is
-        NOT worth 88¢.  With 14 minutes of BTC volatility ahead, it's closer
-        to 55¢.  But with 1 minute left, the same distance IS worth 90¢+.
+        The key insight: a 0.15% distance from strike with 14 minutes left is
+        NOT worth anything — it's pure noise. Even with 5 minutes left, small
+        moves are unreliable because Kalshi settles on a 1-minute BRTI average
+        which can differ significantly from instantaneous spot.
+
+        v4 TIGHTENING: Raised minimum distance thresholds significantly.
+        A $80 BTC move (0.1%) used to trigger trades; now we need $200+ (0.25%).
 
         distance: absolute $ distance between spot and strike (always positive).
         strike:   the floor_strike value, used for normalisation.
@@ -334,37 +350,44 @@ class LatencyArbStrategy:
 
         pct_distance = distance / strike  # e.g. $200 / $80000 = 0.25%
 
-        # Base fair value from distance (this was the old static model)
-        if pct_distance >= 0.005:      # >=0.5% away from strike
+        # v4: Much stricter distance tiers. Old thresholds were letting through
+        # noise trades (0.1% moves = ~$80 BTC) that reverted before settlement.
+        if pct_distance >= 0.007:      # >=0.7% away from strike (~$560 BTC)
             base_fair = 0.92
-        elif pct_distance >= 0.003:    # >=0.3%
-            base_fair = 0.82
-        elif pct_distance >= 0.002:    # >=0.2%
+        elif pct_distance >= 0.005:    # >=0.5% (~$400)
+            base_fair = 0.85
+        elif pct_distance >= 0.003:    # >=0.3% (~$240)
             base_fair = 0.72
-        elif pct_distance >= 0.001:    # >=0.1%
+        elif pct_distance >= 0.0025:   # >=0.25% (~$200)
             base_fair = 0.62
+        elif pct_distance >= 0.002:    # >=0.2% (~$160)
+            base_fair = 0.56
         else:
-            base_fair = 0.55
+            # Below 0.2% distance: NOT tradeable. Any fair value <= 0.50
+            # will produce zero or negative edge vs any realistic ask price.
+            base_fair = 0.50
 
-        # TIME DECAY: scale the fair value based on minutes remaining.
-        # Late in the interval the fair value holds.  Early, the market is
-        # basically a coinflip and the "fair" price is much lower because
-        # BTC can retrace easily.
+        # TIME DECAY v4: Much more aggressive discounting for early intervals.
+        # The old multipliers were too generous — 0.40 at 15 min still generated
+        # positive edge on cheap contracts, leading to high-volume losing trades.
         if minutes_remaining <= 1.0:
             # Final minute — price is locked in, full fair value
             time_multiplier = 1.0
+        elif minutes_remaining <= 2.0:
+            # Last 2 minutes — very high confidence
+            time_multiplier = 0.92
         elif minutes_remaining <= 3.0:
-            # Last 3 minutes — high conviction zone
-            time_multiplier = 0.90
+            # Last 3 minutes — high confidence
+            time_multiplier = 0.80
         elif minutes_remaining <= 5.0:
-            # 3-5 minutes — moderate conviction
-            time_multiplier = 0.70
+            # 3-5 minutes — moderate, but BTC can still move 0.1% easily
+            time_multiplier = 0.60
         elif minutes_remaining <= 10.0:
-            # 5-10 minutes — lots of reversion risk
-            time_multiplier = 0.50
+            # 5-10 minutes — very risky, aggressive discount
+            time_multiplier = 0.35
         else:
-            # >10 minutes — very early, near coinflip territory
-            time_multiplier = 0.40
+            # >10 minutes — nearly worthless signal, huge reversion risk
+            time_multiplier = 0.20
 
         # The time-adjusted fair value
         adjusted_fair = 0.50 + (base_fair - 0.50) * time_multiplier

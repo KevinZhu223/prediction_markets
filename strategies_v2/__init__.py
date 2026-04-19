@@ -11,4 +11,6 @@ Modules:
   - transcript_sniper: Real-time audio transcription for mention markets
   - forex_arb:         EUR/USD & USD/JPY hourly directional arb via Yahoo Finance
   - tennis_arb:        ATP/WTA/Challenger match & set winner arb via ESPN live scores
+  - commodity_arb:     WTI Crude / Gold / NatGas / Lithium arb via Yahoo Finance
+  - yield_farmer:      Near-settlement certainty gap farming
 """

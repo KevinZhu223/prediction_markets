@@ -224,10 +224,14 @@ class WeatherArbStrategy:
     Monitors NOAA stations and generates signals for Kalshi weather markets.
     
     Strategy logic:
-    - For TEMPERATURE markets ("above X°F"):
-      - If observed temp > strike by 2°F+ → BUY YES (high confidence)
-      - If observed temp < strike by 2°F+ → BUY NO (high confidence)
-      - If within ±2°F → use trend from recent observations
+    - For HOURLY TEMPERATURE markets ("above X°F at 1 AM"):
+      - If observed temp > strike by margin → BUY YES (high confidence)
+      - If observed temp < strike by margin → BUY NO (high confidence)
+      
+    - For DAILY HIGH TEMPERATURE markets ("daily high above X°F"):
+      - NEVER buy NO in the morning/afternoon (temp hasn't peaked yet!)
+      - Only buy YES if current temp already exceeds strike
+      - Only buy NO after ~3 PM ET when the daily high is locked in
       
     - For PRECIPITATION markets ("will it rain?"):
       - If precip > 0.01mm observed → BUY YES
@@ -297,7 +301,7 @@ class WeatherArbStrategy:
             await asyncio.sleep(self.poll_interval_seconds)
 
     async def _discover_markets(self):
-        """Find active hourly weather markets on Kalshi."""
+        """Find active hourly and daily-high weather markets on Kalshi."""
         if not self.kalshi:
             return
 
@@ -311,11 +315,17 @@ class WeatherArbStrategy:
                 if m.get("status") != "active":
                     continue
                 title_lower = m.get("title", "").lower()
-                if not (
+                ticker_upper = m.get("ticker", "").upper()
+                # Match hourly temp, daily high, and precipitation markets
+                is_weather = (
                     "temperature" in title_lower
                     or "precip" in title_lower
                     or "temp" in title_lower
-                ):
+                    or "daily high" in title_lower
+                    or "high temperature" in title_lower
+                    or ticker_upper.startswith("KXHIGH")
+                )
+                if not is_weather:
                     continue
 
                 ticker = m.get("ticker", "")
@@ -325,7 +335,11 @@ class WeatherArbStrategy:
                 hours_to_expiry = self._hours_to_expiry(m)
                 if hours_to_expiry is None or hours_to_expiry <= 0:
                     continue
-                if hours_to_expiry > self._max_hours_to_expiry:
+                # Daily high markets can have longer expiry windows (up to 12h);
+                # hourly markets use the normal max_hours_to_expiry.
+                is_daily_high = ticker_upper.startswith("KXHIGH") or "daily high" in title_lower
+                max_hours = 12.0 if is_daily_high else self._max_hours_to_expiry
+                if hours_to_expiry > max_hours:
                     continue
 
                 volume = float(m.get("volume_fp", 0) or 0)
@@ -394,9 +408,9 @@ class WeatherArbStrategy:
         if hours_to_expiry > self._max_hours_to_expiry:
             return None
 
-        # Parse the market to determine the station and strike.
+        # Parse the market to determine the station, strike, type, and sub_type.
         # Prefer floor_strike from market data (authoritative) over title regex.
-        station_id, strike_value, market_type = self._parse_weather_market(title, ticker, market)
+        station_id, strike_value, market_type, sub_type = self._parse_weather_market(title, ticker, market)
         if not station_id:
             return None
         if market_type == "temperature" and strike_value <= 0:
@@ -432,6 +446,7 @@ class WeatherArbStrategy:
         signal = self._calculate_signal(
             ticker=ticker,
             market_type=market_type,
+            sub_type=sub_type,
             observed=observed,
             strike=strike_value,
             yes_bid=yes_bid,
@@ -474,19 +489,36 @@ class WeatherArbStrategy:
         yes_ask: float,
         station_id: str,
         hours_to_expiry: float = 1.0,
+        sub_type: str = "hourly",
     ) -> Optional[Signal]:
         """
         Core signal generation logic with time-decay awareness.
 
-        The required confidence margin scales dynamically with time-to-expiry:
-          - 2.0h out: need 4.0°F margin  (weather can shift a lot)
-          - 1.0h out: need 2.5°F margin
-          - 0.5h out: need 1.5°F margin
-          - 0.25h out: need 1.0°F margin  (nearly settled)
+        HOURLY markets:
+          The required confidence margin scales dynamically with time-to-expiry.
+          This prevents the bot from entering trades hours early based on
+          momentary temperature readings that can drift before settlement.
 
-        This prevents the bot from entering trades hours early based on
-        momentary temperature readings that can drift before settlement.
+        DAILY HIGH markets:
+          Temperature naturally rises during the day and peaks around 2-4 PM.
+          Betting NO on "daily high above X" in the morning is suicide because
+          the high hasn't been recorded yet. We ONLY allow:
+            - YES: when current temp already exceeds the strike (it's already the high)
+            - NO:  only after 3 PM ET (≤2h to expiry) when the peak has passed
         """
+        if market_type == "temperature" and sub_type == "daily_high":
+            return self._calculate_daily_high_signal(
+                ticker=ticker,
+                observed=observed,
+                strike=strike,
+                yes_bid=yes_bid,
+                yes_ask=yes_ask,
+                station_id=station_id,
+                hours_to_expiry=hours_to_expiry,
+            )
+
+        # ── Standard hourly temperature logic ──────────────────────────
+
         # Dynamic margin: scales linearly from 3.0°F (at 0h) to 7.0°F (at 2h)
         # ULTRA CONSERVATIVE: requires overwhelming temp evidence to trade
         dynamic_margin = max(3.0, 3.0 + (hours_to_expiry * 4.0))
@@ -572,22 +604,121 @@ class WeatherArbStrategy:
 
         return None
 
+    def _calculate_daily_high_signal(
+        self,
+        ticker: str,
+        observed: float,
+        strike: float,
+        yes_bid: float,
+        yes_ask: float,
+        station_id: str,
+        hours_to_expiry: float,
+    ) -> Optional[Signal]:
+        """
+        Signal logic for DAILY HIGH temperature markets.
+
+        Key insight: daily high temperature is a running maximum.
+        If it's 10 AM and current temp is 55°F vs a strike of 65°F,
+        that tells us NOTHING — the high could easily hit 70°F by 3 PM.
+        The old code would buy NO here and lose money every time.
+
+        Rules:
+          1. YES is allowed if observed temp ALREADY exceeds the strike.
+             (The high is at least the current temp, so YES is guaranteed.)
+          2. NO is ONLY allowed in the final 2 hours (after ~3 PM ET)
+             when the daily peak has most likely already occurred.
+             We also require a large margin (current temp well below strike).
+          3. Otherwise: DO NOTHING. This is the critical fix.
+        """
+        diff = observed - strike
+
+        # ── Case 1: current temp already exceeds the strike ────────────
+        # The daily high is at least the current reading, so YES is locked in.
+        if diff > 2.0:
+            # Conservative fair value: very high because the outcome is decided
+            fair_value = min(0.97, 0.88 + (diff / 20.0) * 0.09)
+            if yes_ask < fair_value - 0.03:
+                edge = (fair_value - yes_ask) * 100
+                if edge >= self.min_edge_cents:
+                    return Signal(
+                        strategy="weather_arb",
+                        action=Side.BUY,
+                        contract_side=ContractSide.YES,
+                        platform=Platform.KALSHI,
+                        market_id=ticker,
+                        target_price=yes_ask,
+                        quantity=self._calculate_size(edge),
+                        confidence=min(0.97, 0.90 + diff * 0.01),
+                        reason=(
+                            f"DAILY HIGH {station_id}: obs {observed:.1f}°F ALREADY > "
+                            f"strike {strike:.1f}°F by {diff:.1f}° → YES locked"
+                        ),
+                    )
+
+        # ── Case 2: late afternoon NO (peak has likely passed) ─────────
+        # Only allow NO trades in the final 2 hours when the daily high
+        # is effectively finalized. Require a massive margin.
+        if hours_to_expiry <= 2.0 and diff < -5.0:
+            # Late in the day and temp is well below strike
+            # More conservative: need bigger margin with more time
+            required_margin = max(5.0, 5.0 + (hours_to_expiry * 3.0))
+            if diff < -required_margin:
+                base_fair_no = min(0.90, 0.70 + (abs(diff) / 15.0) * 0.15)
+                # Further discount with time — even 2h out is uncertain
+                time_mult = max(0.60, 1.0 - hours_to_expiry * 0.20)
+                fair_no = 0.50 + (base_fair_no - 0.50) * time_mult
+                no_ask = 1.0 - yes_bid
+                if no_ask > 0 and no_ask < fair_no - 0.05:
+                    edge = (fair_no - no_ask) * 100
+                    if edge >= self.min_edge_cents:
+                        return Signal(
+                            strategy="weather_arb",
+                            action=Side.BUY,
+                            contract_side=ContractSide.NO,
+                            platform=Platform.KALSHI,
+                            market_id=ticker,
+                            target_price=no_ask,
+                            quantity=self._calculate_size(edge),
+                            confidence=min(0.90, 0.65 + abs(diff) * 0.03) * time_mult,
+                            reason=(
+                                f"DAILY HIGH {station_id}: obs {observed:.1f}°F < "
+                                f"strike {strike:.1f}°F by {abs(diff):.1f}° "
+                                f"(late PM, {hours_to_expiry:.1f}h left, margin={required_margin:.1f}°)"
+                            ),
+                        )
+
+        # ── Case 3: too early / inconclusive → DO NOTHING ──────────────
+        # This is the critical path that prevents the old systematic losses.
+        logger.debug(
+            "Weather arb: DAILY HIGH %s skipped — obs=%.1f°F, strike=%.1f°F, "
+            "%.1fh left (too early/uncertain for NO, diff too small for YES)",
+            ticker, observed, strike, hours_to_expiry,
+        )
+        return None
+
     def _calculate_size(self, edge: float) -> int:
         return max(1, min(100, int(edge * 2)))
 
     def _parse_weather_market(
         self, title: str, ticker: str, market: dict | None = None
-    ) -> tuple[Optional[str], float, str]:
+    ) -> tuple[Optional[str], float, str, str]:
         """
-        Parse a Kalshi weather market to extract station and strike.
+        Parse a Kalshi weather market to extract station, strike, type,
+        and sub_type.
+
+        Returns:
+            (station_id, strike, market_type, sub_type)
+            sub_type is "hourly" or "daily_high"
 
         Uses the market's floor_strike field (authoritative) when available,
         falling back to regex on the title / ticker.
 
         Example titles:
           "Will the temp in NYC be above 75.99° on Apr 14, 2026 at 1am EDT?"
+          "Will the daily high in Denver be above 65°F on Apr 14, 2026?"
         Example tickers:
-          "KXTEMPNYCH-26APR1401-T75.99"
+          "KXTEMPNYCH-26APR1401-T75.99"   (hourly)
+          "KXHIGHDEN-26APR14-T65"         (daily high)
         """
         import re
         title_lower = title.lower()
@@ -604,14 +735,14 @@ class WeatherArbStrategy:
                 if sid.lower()[1:] in title_lower:  # "nyc" from "KNYC"
                     station_id = sid
                     break
-        # Try to derive from series ticker (e.g. KXTEMPNYCH → NYC)
+        # Try to derive from series ticker (e.g. KXTEMPNYCH → NYC, KXHIGHDEN → DEN)
         if not station_id:
             ticker_upper = ticker.upper()
             if "NYC" in ticker_upper or "NYD" in ticker_upper:
                 station_id = "KNYC"
             elif "CHI" in ticker_upper or "ORD" in ticker_upper:
                 station_id = "KORD"
-            elif "LAX" in ticker_upper or "LA" in ticker_upper:
+            elif "LAX" in ticker_upper:
                 station_id = "KLAX"
             elif "MIA" in ticker_upper:
                 station_id = "KMIA"
@@ -624,15 +755,27 @@ class WeatherArbStrategy:
             elif "ATL" in ticker_upper:
                 station_id = "KATL"
 
-        # ── Determine market type ──────────────────────────────────────
+        # ── Determine market type and sub_type ─────────────────────────
         market_type = ""
+        sub_type = "hourly"  # Default
         strike = 0.0
 
-        if "temperature" in title_lower or "temp" in title_lower:
+        if "temperature" in title_lower or "temp" in title_lower or "high" in title_lower:
             market_type = "temperature"
         elif "precipitation" in title_lower or "rain" in title_lower or "precip" in title_lower:
             market_type = "precipitation"
             strike = 0.01  # Default: any measurable precipitation
+
+        # Detect daily high markets:
+        #   - Ticker starts with KXHIGH (KXHIGHDEN, KXHIGHMIA, KXHIGHLAX, etc.)
+        #   - Title contains "daily high" or "high temperature"
+        ticker_upper = ticker.upper()
+        if ticker_upper.startswith("KXHIGH"):
+            sub_type = "daily_high"
+            market_type = "temperature"  # Always temperature for high markets
+        elif "daily high" in title_lower or "high temperature" in title_lower:
+            sub_type = "daily_high"
+        # KXTEMPNYCH is hourly (default), no change needed
 
         # ── Determine strike ───────────────────────────────────────────
         if market_type == "temperature":
@@ -659,7 +802,7 @@ class WeatherArbStrategy:
                     if match:
                         strike = float(match.group(1))
 
-        return station_id, strike, market_type
+        return station_id, strike, market_type, sub_type
 
     def get_stats(self) -> dict:
         return {

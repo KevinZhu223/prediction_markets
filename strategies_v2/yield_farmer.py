@@ -26,9 +26,9 @@ class YieldFarmerStrategy:
         self._active = False
         
         # Configuration
-        self.min_yield_threshold = 0.95  # Target markets priced >= 95c
+        self.min_yield_threshold = 0.93  # Target markets priced >= 93c (wider net)
         self.max_yield_threshold = 0.98  # Ignore if it's already 99c
-        self.poll_interval = 300         # Check every 5 minutes to avoid rate limits
+        self.poll_interval = 60          # Check every 60s for faster capture
         self._min_volume = max(0.0, Config.YIELD_MIN_VOLUME)
         self._max_spread = max(0.0, Config.YIELD_MAX_SPREAD)
         self._max_hours_to_expiry = max(1.0, Config.YIELD_MAX_HOURS_TO_EXPIRY)
@@ -151,7 +151,7 @@ class YieldFarmerStrategy:
 
     def _calculate_size(self) -> int:
         # Go heavy on "guaranteed" bets. Risk manager limits to max allocation.
-        return 100 
+        return 200 
 
     def get_stats(self) -> dict:
         return {

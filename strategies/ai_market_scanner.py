@@ -417,13 +417,26 @@ Return compact JSON only. Keep reasoning <= 25 words."""
             return False
         if self.pessimistic_mode:
             # PESSIMISTIC PIVOT: Skip pure quantitative markets (Sports, Finance, Weather)
-            # where we have zero edge against institutional HFT models.
-            skip_words = ["points", "rebounds", "assists", "temperature", "precip", "cpi", "gdp", "fed rate", "inflation", "unemployment"]
+            # where we have zero edge against institutional HFT models,
+            # OR where dedicated zero-cost arb strategies already handle them.
+            skip_words = ["points", "rebounds", "assists", "temperature", "precip", "cpi", "gdp", "fed rate", "inflation", "unemployment",
+                          "crude", "wti", "oil price", "gold price", "natural gas", "lithium",
+                          "eur/usd", "usd/jpy", "forex", "exchange rate",
+                          "beat", "match winner", "set winner"]
             if any(w in title for w in skip_words):
                 return False
                 
-            # Filter out major sports tickers
-            if ticker.startswith("KXNBA") or ticker.startswith("KXNFL") or ticker.startswith("KXMLB") or ticker.startswith("KXNHL"):
+            # Filter out major sports tickers & markets covered by dedicated strategies
+            skip_prefixes = (
+                "KXNBA", "KXNFL", "KXMLB", "KXNHL",   # Sports (no edge vs HFT)
+                "KXATP", "KXWTA", "KXITF",              # Tennis (covered by tennis_arb.py)
+                "KXWTI", "KXGOLD", "KXNATGAS",           # Commodities (covered by commodity_arb.py)
+                "KXLITHIUM",                              # Lithium (covered by commodity_arb.py)
+                "KXEURUSD", "KXUSDJPY",                   # Forex (covered by forex_arb.py)
+                "KXTEMP", "KXHIGH",                       # Weather (covered by weather_arb.py)
+                "KXBTC15M", "KXETH15M",                   # Crypto (covered by latency_arb.py)
+            )
+            if any(ticker.startswith(prefix) for prefix in skip_prefixes):
                 return False
 
         return True
