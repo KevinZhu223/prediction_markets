@@ -59,12 +59,8 @@ COMMODITY_PAIRS = {
         "tick_size": 0.001,
         "min_distance_pct": 1.0,    # Nat gas is volatile, need bigger margin
     },
-    "LITHIUM": {
-        "yahoo_symbol": "ALI=F",    # CME Aluminum (closest liquid proxy)
-        "kalshi_prefixes": ["KXLITHIUMW"],
-        "tick_size": 1.0,
-        "min_distance_pct": 0.5,
-    },
+    # LITHIUM removed — 0/3 win rate in settlements, ALI=F is a poor proxy
+    # for KXLITHIUMW which tracks a different LME contract. Skip until better data.
 }
 
 

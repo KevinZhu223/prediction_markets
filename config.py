@@ -96,7 +96,7 @@ class Config:
 
     # ── Weather / Equity Strategy Guards ───────────────────────────────
     WEATHER_OBSERVATION_MAX_AGE_SECONDS: float = float(
-        os.getenv("WEATHER_OBSERVATION_MAX_AGE_SECONDS", "1500.0")
+        os.getenv("WEATHER_OBSERVATION_MAX_AGE_SECONDS", "360.0")
     )
     WEATHER_OBS_CACHE_TTL_SECONDS: float = float(
         os.getenv("WEATHER_OBS_CACHE_TTL_SECONDS", "45.0")
@@ -111,7 +111,7 @@ class Config:
         os.getenv("WEATHER_SIGNAL_COOLDOWN_SECONDS", "900.0")
     )
     WEATHER_MAX_SPREAD: float = float(os.getenv("WEATHER_MAX_SPREAD", "0.14"))
-    WEATHER_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("WEATHER_MAX_HOURS_TO_EXPIRY", "0.5"))
+    WEATHER_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("WEATHER_MAX_HOURS_TO_EXPIRY", "0.15"))
     EQUITY_SIGNAL_COOLDOWN_SECONDS: float = float(
         os.getenv("EQUITY_SIGNAL_COOLDOWN_SECONDS", "240.0")
     )
@@ -137,7 +137,7 @@ class Config:
     # ── Tennis Arb ─────────────────────────────────────────────────────
     TENNIS_ENABLED: bool = os.getenv("TENNIS_ENABLED", "true").lower() == "true"
     TENNIS_POLL_INTERVAL_SECONDS: float = float(os.getenv("TENNIS_POLL_INTERVAL_SECONDS", "45.0"))
-    TENNIS_MIN_EDGE: float = float(os.getenv("TENNIS_MIN_EDGE", "0.07"))
+    TENNIS_MIN_EDGE: float = float(os.getenv("TENNIS_MIN_EDGE", "0.10"))
     TENNIS_MAX_SPREAD: float = float(os.getenv("TENNIS_MAX_SPREAD", "0.12"))
     TENNIS_SIGNAL_COOLDOWN_SECONDS: float = float(os.getenv("TENNIS_SIGNAL_COOLDOWN_SECONDS", "300.0"))
 

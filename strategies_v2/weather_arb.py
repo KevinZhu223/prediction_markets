@@ -519,9 +519,10 @@ class WeatherArbStrategy:
 
         # ── Standard hourly temperature logic ──────────────────────────
 
-        # Dynamic margin: scales linearly from 3.0°F (at 0h) to 7.0°F (at 2h)
+        # Dynamic margin: scales linearly from 5.0°F (at 0h) to 13.0°F (at 2h)
         # ULTRA CONSERVATIVE: requires overwhelming temp evidence to trade
-        dynamic_margin = max(3.0, 3.0 + (hours_to_expiry * 4.0))
+        # Settlement data shows 3°F was NOT enough — lost 29/31 with old margin
+        dynamic_margin = max(5.0, 5.0 + (hours_to_expiry * 8.0))
 
         # Time-based fair value multiplier (similar to latency arb theta)
         if hours_to_expiry <= 0.25:

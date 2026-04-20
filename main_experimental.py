@@ -39,6 +39,7 @@ from strategies_v2.transcript_sniper import TranscriptSniperStrategy
 from strategies_v2.forex_arb import ForexArbStrategy
 from strategies_v2.tennis_arb import TennisArbStrategy
 from strategies_v2.commodity_arb import CommodityArbStrategy
+from strategies_v2.longshot_fader import LongshotFaderStrategy
 
 console = Console()
 
@@ -79,6 +80,7 @@ def render_dashboard(
     forex: ForexArbStrategy,
     tennis: TennisArbStrategy,
     commodity: CommodityArbStrategy,
+    longshot_fader: LongshotFaderStrategy,
 ) -> Group:
     """Render a live dashboard table with bot stats."""
     risk_stats = risk_manager.get_stats()
@@ -91,6 +93,7 @@ def render_dashboard(
     forex_stats = forex.get_stats()
     tennis_stats = tennis.get_stats()
     commodity_stats = commodity.get_stats()
+    longshot_stats = longshot_fader.get_stats()
 
     table = Table(title="Prediction Market Bot -- Full Dashboard", expand=True)
     table.add_column("Metric", style="cyan", width=32)
@@ -152,6 +155,11 @@ def render_dashboard(
     table.add_row("--- Commodity Arb ---", "")
     table.add_row("Active Commodity Markets", str(commodity_stats.get('active_markets', 0)))
     table.add_row("Commodity Signals", str(commodity_stats.get('signals_generated', 0)))
+
+    table.add_row("--- Longshot Fader (FLB) ---", "")
+    table.add_row("Markets Scanned", str(longshot_stats.get('markets_scanned', 0)))
+    table.add_row("Longshot Opportunities", str(longshot_stats.get('opportunities_found', 0)))
+    table.add_row("Longshot Signals", str(longshot_stats.get('signals_generated', 0)))
 
     # Spot prices
     table.add_row("--- Spot Prices ---", "")
@@ -260,6 +268,7 @@ async def main():
     forex = ForexArbStrategy(kalshi_exchange=kalshi)
     tennis = TennisArbStrategy(kalshi_exchange=kalshi)
     commodity = CommodityArbStrategy(kalshi_exchange=kalshi)
+    longshot_fader = LongshotFaderStrategy(kalshi_exchange=kalshi)
 
     # -- Connect to Kalshi --
     try:
@@ -307,6 +316,7 @@ async def main():
     else:
         logger.info("Tennis arb: disabled (TENNIS_ENABLED=false)")
     await commodity.start()
+    await longshot_fader.start()
 
     # Discover mention markets for transcript sniper
     try:
@@ -371,9 +381,12 @@ async def main():
     tasks.append(asyncio.create_task(
         commodity.run_loop(signal_callback=executor.submit_signal)
     ))
+    tasks.append(asyncio.create_task(
+        longshot_fader.run_loop(signal_callback=executor.submit_signal)
+    ))
 
     console.print("[yellow]Experimental HFT strategies running (Warning: Risk of Adverse Selection!)[/yellow]")
-    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex, Tennis, Commodity[/green]\n")
+    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex, Tennis, Commodity, LongshotFader[/green]\n")
 
     async def portfolio_monitor_loop():
         """Monitor open positions and settle resolved markets."""
@@ -439,7 +452,8 @@ async def main():
         console.clear()
         with Live(
             render_dashboard(risk_manager, executor, ai_scanner, crypto_feed,
-                           weather, macro, equity, transcript, forex, tennis, commodity),
+                           weather, macro, equity, transcript, forex, tennis, commodity,
+                           longshot_fader),
             refresh_per_second=1,
             console=console,
             transient=False,
@@ -448,7 +462,8 @@ async def main():
                 try:
                     dash = render_dashboard(
                         risk_manager, executor, ai_scanner, crypto_feed,
-                        weather, macro, equity, transcript, forex, tennis, commodity
+                        weather, macro, equity, transcript, forex, tennis, commodity,
+                        longshot_fader
                     )
                     live.update(dash)
                 except Exception:
@@ -470,6 +485,7 @@ async def main():
         await forex.stop()
         await tennis.stop()
         await commodity.stop()
+        await longshot_fader.stop()
         await executor.stop()
         await crypto_feed.stop()
         await kalshi.disconnect()

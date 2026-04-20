@@ -278,7 +278,7 @@ class TennisArbStrategy:
         self._min_edge = max(0.0, Config.TENNIS_MIN_EDGE)
         self._max_spread = max(0.0, Config.TENNIS_MAX_SPREAD)
         self._signal_cooldown = max(30.0, Config.TENNIS_SIGNAL_COOLDOWN_SECONDS)
-        self._min_fair_prob = 0.65  # Only trade when model says >= 65%
+        self._min_fair_prob = 0.72  # Only trade when model says >= 72% (clear dominance)
 
         # State
         self._active_markets: list[dict] = []
