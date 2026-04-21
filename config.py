@@ -95,6 +95,12 @@ class Config:
     YIELD_MAX_HOURS_TO_EXPIRY: float = float(os.getenv("YIELD_MAX_HOURS_TO_EXPIRY", "36.0"))
 
     # ── Weather / Equity Strategy Guards ───────────────────────────────
+    # DISABLED: Kalshi weather markets settle on the NWS Daily Climate
+    # Report (CLI), NOT raw METAR observations.  Our NOAA feed provides
+    # METAR data which can differ by 1-2°F from the CLI, making the
+    # strategy fundamentally unreliable.  Set to "true" to re-enable
+    # if/when we integrate a CLI-aligned data source.
+    WEATHER_ENABLED: bool = os.getenv("WEATHER_ENABLED", "false").lower() == "true"
     WEATHER_OBSERVATION_MAX_AGE_SECONDS: float = float(
         os.getenv("WEATHER_OBSERVATION_MAX_AGE_SECONDS", "360.0")
     )
@@ -125,6 +131,13 @@ class Config:
 
     # ── LLM Linguistic Sniper ───────────────────────────────────────────
     LINGUISTIC_ENABLED: bool = os.getenv("LINGUISTIC_ENABLED", "false").lower() == "true"
+
+    # ── Commodity Arb ──────────────────────────────────────────────────
+    # DISABLED: Lithium (0/3 win rate, ALI=F is a poor proxy) and WTI
+    # (marginal edge, low sample size) have not produced reliable PnL.
+    # Commodity data from Yahoo Finance is also stale vs professional
+    # desks.  Set to "true" to re-enable.
+    COMMODITY_ENABLED: bool = os.getenv("COMMODITY_ENABLED", "false").lower() == "true"
 
     # ── Forex Arb ──────────────────────────────────────────────────────
     FOREX_ENABLED: bool = os.getenv("FOREX_ENABLED", "true").lower() == "true"

@@ -73,26 +73,26 @@ def render_dashboard(
     executor: Executor,
     ai_scanner: AIMarketScanner,
     crypto_feed: CryptoFeed,
-    weather: WeatherArbStrategy,
+    weather,
     macro: MacroNewsStrategy,
     equity: EquityIndexArbStrategy,
     transcript: TranscriptSniperStrategy,
     forex: ForexArbStrategy,
     tennis: TennisArbStrategy,
-    commodity: CommodityArbStrategy,
+    commodity,
     longshot_fader: LongshotFaderStrategy,
 ) -> Group:
     """Render a live dashboard table with bot stats."""
     risk_stats = risk_manager.get_stats()
     exec_stats = executor.get_stats()
     scanner_stats = ai_scanner.get_stats()
-    weather_stats = weather.get_stats()
+    weather_stats = weather.get_stats() if weather else {}
     macro_stats = macro.get_stats()
     equity_stats = equity.get_stats()
     transcript_stats = transcript.get_stats()
     forex_stats = forex.get_stats()
     tennis_stats = tennis.get_stats()
-    commodity_stats = commodity.get_stats()
+    commodity_stats = commodity.get_stats() if commodity else {}
     longshot_stats = longshot_fader.get_stats()
 
     table = Table(title="Prediction Market Bot -- Full Dashboard", expand=True)
@@ -129,8 +129,11 @@ def render_dashboard(
 
     # V2 Experimental Strategies
     table.add_row("--- Weather Arb (NOAA) ---", "")
-    table.add_row("Active Weather Markets", str(weather_stats.get('active_markets', 0)))
-    table.add_row("Weather Signals", str(weather_stats.get('signals_generated', 0)))
+    if weather:
+        table.add_row("Active Weather Markets", str(weather_stats.get('active_markets', 0)))
+        table.add_row("Weather Signals", str(weather_stats.get('signals_generated', 0)))
+    else:
+        table.add_row("Status", "[red]DISABLED[/red] (CLI≠METAR)")
 
     table.add_row("--- Macro News Sniper ---", "")
     table.add_row("Upcoming Releases", str(macro_stats.get('upcoming_releases', 0)))
@@ -153,8 +156,11 @@ def render_dashboard(
     table.add_row("Tennis Signals", str(tennis_stats.get('signals_generated', 0)))
 
     table.add_row("--- Commodity Arb ---", "")
-    table.add_row("Active Commodity Markets", str(commodity_stats.get('active_markets', 0)))
-    table.add_row("Commodity Signals", str(commodity_stats.get('signals_generated', 0)))
+    if commodity:
+        table.add_row("Active Commodity Markets", str(commodity_stats.get('active_markets', 0)))
+        table.add_row("Commodity Signals", str(commodity_stats.get('signals_generated', 0)))
+    else:
+        table.add_row("Status", "[red]DISABLED[/red] (no edge)")
 
     table.add_row("--- Longshot Fader (FLB) ---", "")
     table.add_row("Markets Scanned", str(longshot_stats.get('markets_scanned', 0)))
@@ -257,7 +263,7 @@ async def main():
     linguistic_sniper = LinguisticSniperStrategy()
 
     # V2 Strategies
-    weather = WeatherArbStrategy(kalshi_exchange=kalshi)
+    weather = WeatherArbStrategy(kalshi_exchange=kalshi) if Config.WEATHER_ENABLED else None
     macro = MacroNewsStrategy(kalshi_exchange=kalshi)
     equity = EquityIndexArbStrategy(kalshi_exchange=kalshi)
     transcript = TranscriptSniperStrategy(
@@ -267,7 +273,7 @@ async def main():
     )
     forex = ForexArbStrategy(kalshi_exchange=kalshi)
     tennis = TennisArbStrategy(kalshi_exchange=kalshi)
-    commodity = CommodityArbStrategy(kalshi_exchange=kalshi)
+    commodity = CommodityArbStrategy(kalshi_exchange=kalshi) if Config.COMMODITY_ENABLED else None
     longshot_fader = LongshotFaderStrategy(kalshi_exchange=kalshi)
 
     # -- Connect to Kalshi --
@@ -303,7 +309,10 @@ async def main():
         logger.info("Linguistic sniper: disabled (LINGUISTIC_ENABLED=false)")
     
     await ai_scanner.start()
-    await weather.start()
+    if weather:
+        await weather.start()
+    else:
+        logger.info("Weather arb: DISABLED (Kalshi settles on NWS CLI, not METAR — set WEATHER_ENABLED=true to re-enable)")
     await macro.start()
     await equity.start()
     await transcript.start()
@@ -315,7 +324,10 @@ async def main():
         await tennis.start()
     else:
         logger.info("Tennis arb: disabled (TENNIS_ENABLED=false)")
-    await commodity.start()
+    if commodity:
+        await commodity.start()
+    else:
+        logger.info("Commodity arb: DISABLED (Lithium 0/3, WTI marginal — set COMMODITY_ENABLED=true to re-enable)")
     await longshot_fader.start()
 
     # Discover mention markets for transcript sniper
@@ -361,9 +373,10 @@ async def main():
     tasks.append(asyncio.create_task(latency_orderbook_poll_loop()))
 
     # Experimental Speed loops
-    tasks.append(asyncio.create_task(
-        weather.run_loop(signal_callback=executor.submit_signal)
-    ))
+    if weather:
+        tasks.append(asyncio.create_task(
+            weather.run_loop(signal_callback=executor.submit_signal)
+        ))
     tasks.append(asyncio.create_task(
         equity.run_loop(signal_callback=executor.submit_signal)
     ))
@@ -378,15 +391,29 @@ async def main():
         tasks.append(asyncio.create_task(
             tennis.run_loop(signal_callback=executor.submit_signal)
         ))
-    tasks.append(asyncio.create_task(
-        commodity.run_loop(signal_callback=executor.submit_signal)
-    ))
+    if commodity:
+        tasks.append(asyncio.create_task(
+            commodity.run_loop(signal_callback=executor.submit_signal)
+        ))
     tasks.append(asyncio.create_task(
         longshot_fader.run_loop(signal_callback=executor.submit_signal)
     ))
 
+    # Build active strategies list for banner
+    active_strats = ["Latency", "Macro", "Equity", "Transcript", "LongshotFader"]
+    if weather:   active_strats.append("Weather")
+    if commodity:  active_strats.append("Commodity")
+    if Config.FOREX_ENABLED:  active_strats.append("Forex")
+    if Config.TENNIS_ENABLED: active_strats.append("Tennis")
     console.print("[yellow]Experimental HFT strategies running (Warning: Risk of Adverse Selection!)[/yellow]")
-    console.print("[green]Active strategies: Latency, Weather, Macro, Equity, Transcript, Forex, Tennis, Commodity, LongshotFader[/green]\n")
+    console.print(f"[green]Active strategies: {', '.join(active_strats)}[/green]")
+    disabled_strats = []
+    if not weather:   disabled_strats.append("Weather")
+    if not commodity:  disabled_strats.append("Commodity")
+    if disabled_strats:
+        console.print(f"[red]Disabled strategies: {', '.join(disabled_strats)}[/red]\n")
+    else:
+        console.print()
 
     async def portfolio_monitor_loop():
         """Monitor open positions and settle resolved markets."""
@@ -478,13 +505,15 @@ async def main():
         await latency_arb.stop()
         await ai_scanner.stop()
         await linguistic_sniper.stop()
-        await weather.stop()
+        if weather:
+            await weather.stop()
         await macro.stop()
         await equity.stop()
         await transcript.stop()
         await forex.stop()
         await tennis.stop()
-        await commodity.stop()
+        if commodity:
+            await commodity.stop()
         await longshot_fader.stop()
         await executor.stop()
         await crypto_feed.stop()
